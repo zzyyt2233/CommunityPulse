@@ -1,0 +1,31 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+env/
+# 首次装依赖成功后生成的标记
+venv/.deps_installed
+
+# ---- 运行时数据（含数据库、导出、浏览器 profile、你的 Cookie）----
+data/
+logs/
+
+# ---- 打包产物（tools/make_dist.py 的输出，含 20MB 的离线 wheel）----
+dist/
+
+# 上面整块忽略掉 data/ 是为了安全：里面可能有含登录 Cookie 的 settings.json、
+# 真实采集到的评论数据 pulse.db、以及几十 MB 的浏览器 profile 目录。
+# 如果确实要提交「空目录结构」占位，见 README 的分发章节。
+
+# ---- 编辑器 / 系统 ----
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- 本地私有配置（如果以后放到根目录）----
+config.local.yaml
+config.local.yml

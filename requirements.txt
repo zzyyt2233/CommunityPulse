@@ -1,0 +1,18 @@
+# CommunityPulse 依赖清单
+#
+# 重要：下面三个包【全部是可选的】。一个都不装，程序也能正常启动、采集和分析：
+#   - jieba   缺失 -> 使用内置分词（效果略差，但功能完整）
+#   - openpyxl 缺失 -> Excel 导出自动降级为 CSV（页面会有提示）
+#   - httpx    缺失 -> HTTP 请求走标准库 urllib
+#
+# 所以本文件可以按需裁剪：
+#   完整体验 : pip install -r requirements.txt
+#   最小安装 : 什么都不装，直接启动即可
+#   只要分词 : pip install jieba
+#
+# 注意：开发环境里曾误装过 fastapi / starlette / pydantic 等包，它们与本工具无关，
+# 请勿加入本清单，否则会让别人白白下载几十 MB。
+
+jieba>=0.42.1
+openpyxl>=3.1.0
+httpx>=0.27

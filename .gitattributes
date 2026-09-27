@@ -1,0 +1,15 @@
+# 换行符：本机脚本必须 LF，Windows 批处理必须 CRLF。
+# 否则 GitHub 上克隆下来，bash 脚本会报 `bad interpreter: \r`。
+*.sh text eol=lf
+*.bat text eol=crlf
+*.py text eol=lf
+*.js text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.md text eol=lf
+
+# 图标 / 二进制当作二进制处理，禁止被 diff 或换行转换破坏
+*.png binary
+*.ico binary
+*.db binary
+*.xlsx binary

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CommunityPulse · 社区舆情雷达</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header>
+  <h1>CommunityPulse</h1>
+  <span class="sub">社区舆情雷达 · 评论采集 / 词条统计 / 相似句聚类 / 情感与吐槽点分析</span>
+  <span class="spacer"></span>
+  <span class="sub" id="health">连接中…</span>
+</header>
+
+<div class="layout">
+  <!-- 左栏 -->
+  <div>
+    <div class="panel">
+      <h3>新建采集 <span class="tip">粘贴链接即可</span></h3>
+      <label>社区链接（每行一个，可一次填多个来源批量采集）</label>
+      <textarea id="url" rows="5" placeholder="https://www.bilibili.com/video/BV...&#10;https://weibo.com/detail/xxxx"></textarea>
+      <div class="mut" id="urlCount" style="margin-top:4px;color:var(--brand)">尚未识别到链接</div>
+      <div class="row" style="margin-top:10px">
+        <div>
+          <label>任务名称（可选）</label>
+          <input type="text" id="name" placeholder="如：2.3版本 更新反馈">
+        </div>
+        <div style="max-width:120px">
+          <label>目标条数</label>
+          <input type="number" id="limit" value="300" min="10" max="20000">
+        </div>
+      </div>
+      <label>排序方式（决定取哪些评论）</label>
+      <select id="sortMode">
+        <option value="hot">按热度排序，取前 N 条（推荐）</option>
+        <option value="new">按时间排序，取最新 N 条</option>
+        <option value="both">热度 + 最新两路合并，尽量凑够 N 条</option>
+      </select>
+      <div class="row" style="margin-top:12px">
+        <button id="btnPreview" class="ghost">先试抓（不入库）</button>
+        <button id="btnCollect" class="primary">开始采集</button>
+      </div>
+      <div class="mut" style="margin-top:6px">试抓会用同样的条数和排序真跑一遍，用来确认到底能抓到多少条。</div>
+      <div id="previewBox"></div>
+    </div>
+
+    <div class="panel">
+      <h3>关键词发现 <span class="tip">不知道盯哪些帖子时用</span></h3>
+      <label>搜索关键词（如游戏名、版本名）</label>
+      <div class="row">
+        <input type="text" id="kw" placeholder="如：原神 卡顿">
+        <button id="btnDiscover" class="ghost" style="max-width:96px">搜索</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <select id="kwPlatform">
+          <option value="bilibili">B站（匿名可用）</option>
+          <option value="weibo">微博（需登录）</option>
+          <option value="tieba">百度贴吧（需登录）</option>
+          <option value="nga">NGA 论坛（可匿名）</option>
+          <option value="taptap">TapTap（浏览器助手）</option>
+          <option value="douyin">抖音（浏览器助手）</option>
+          <option value="xiaohongshu">小红书（浏览器助手）</option>
+          <option value="reddit">Reddit（海外）</option>
+          <option value="steam">Steam（搜索常不可达）</option>
+        </select>
+        <select id="kwSort">
+          <option value="hot">按热度</option>
+          <option value="new">按最新</option>
+        </select>
+        <select id="kwLimit">
+          <option value="10">10 条</option>
+          <option value="20" selected>20 条</option>
+          <option value="30">30 条</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <div style="max-width:150px">
+          <label>热度前 N 个来源</label>
+          <select id="kwTopN">
+            <option value="3">前 3 个</option>
+            <option value="5" selected>前 5 个</option>
+            <option value="10">前 10 个</option>
+            <option value="20">前 20 个</option>
+          </select>
+        </div>
+        <div style="max-width:150px">
+          <label>每个来源评论数</label>
+          <input type="number" id="kwComments" value="300" min="10" max="20000">
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="btnKeywordCollect" class="primary">搜索并采集（热度前 N）</button>
+        <button id="btnDiscoverOnly" class="ghost">仅搜索（手动勾选）</button>
+      </div>
+      <div id="discoverBox" class="mut" style="margin-top:8px">输入关键词后点「搜索并采集」可一键抓取热度前 N 个来源的评论；或点「仅搜索」手动勾选。抖音/小红书走浏览器助手，会在已登录浏览器里搜索并逐条抓评论。</div>
+    </div>
+
+    <div class="panel">
+      <h3>平台支持情况 <span class="tip">悬停查看说明</span></h3>
+      <div class="plat-list" id="platList"><span class="mut">加载中…</span></div>
+      <div class="mut" style="margin-top:8px">
+        <span class="chip stable">稳定接口</span>
+        <span class="chip best-effort">网页解析</span>
+        <span class="chip restricted">风控受限</span>
+        <span class="chip manual">需手动导入</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>手动导入 <span class="tip">抖音 / 小红书 等走这里</span></h3>
+      <label>粘贴评论（一行一条）或 CSV / JSON 内容</label>
+      <textarea id="impText" placeholder="玩家A：这版本优化太差了&#10;玩家B：抽卡爆率一如既往的感人"></textarea>
+      <div class="row" style="margin-top:8px">
+        <select id="impFmt">
+          <option value="auto">自动识别</option>
+          <option value="text">纯文本（一行一条）</option>
+          <option value="csv">CSV</option>
+          <option value="json">JSON</option>
+        </select>
+        <button id="btnImport" style="max-width:120px">导入</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnCopyScript" class="ghost">复制浏览器采集脚本（抖音 / 小红书）</button>
+      </div>
+      <div id="scriptTip" class="mut" style="margin-top:6px;font-size:12px;line-height:1.6">
+        抖音 / 小红书 有签名风控，服务端抓不到。用这个脚本在你的浏览器里跑：<br>
+        打开视频/笔记页 → 按 F12 → 切到 Console → 粘贴脚本回车 → 自动滚动抓完并下载 JSON → 拖到上面的文本框导入。
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>任务列表</h3>
+      <div class="task-list" id="taskList"><span class="mut">暂无任务</span></div>
+    </div>
+
+    <div class="panel">
+      <h3>平台接入 <span class="tip">点登录 → 一键获取，就能抓完整评论区</span></h3>
+      <div id="credList" class="cred-list"><span class="mut">加载中…</span></div>
+      <div class="row">
+        <div>
+          <label>Steam 语言</label>
+          <select id="setSteamLang">
+            <option value="all">全部语言</option>
+            <option value="schinese">简体中文</option>
+            <option value="english">英文</option>
+          </select>
+        </div>
+        <div>
+          <label>Steam 时间范围(天)</label>
+          <input type="number" id="setSteamDays" value="365" min="1" max="3650">
+        </div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="btnSaveSet" class="primary">保存其他设置</button>
+        <button id="btnReloadSet" class="ghost">刷新状态</button>
+        <button id="btnCloseBrowser" class="ghost">关闭登录浏览器</button>
+      </div>
+      <div class="mut" style="margin-top:6px">
+        凭据只保存在本机 <code>data\settings.json</code>，不会上传到任何地方。<br>
+        「一键获取」需要本机装有 Chrome / Edge：会开一个带调试端口的浏览器窗口，你登录后它把 Cookie 读回来，
+        不会保存你的密码。
+      </div>
+    </div>
+  </div>
+
+  <!-- 右栏 -->
+  <div>
+    <div class="panel">
+      <h3>分析设置</h3>
+      <div class="row">
+        <div>
+          <label>相似句判定阈值（越低越宽松）</label>
+          <input type="number" id="threshold" value="0.45" step="0.05" min="0.3" max="0.8">
+        </div>
+        <div>
+          <label>词条数量 Top N</label>
+          <input type="number" id="topN" value="60" min="10" max="200">
+        </div>
+        <div>
+          <label>额外停用词（空格分隔）</label>
+          <input type="text" id="stopwords" placeholder="如：本帖 楼主">
+        </div>
+        <div>
+          <label>仅分析热度前 N 条（0 = 全部）</label>
+          <input type="number" id="topLiked" value="0" min="0" max="20000">
+        </div>
+      </div>
+      <div class="row" style="margin-top:12px; align-items:center">
+        <button id="btnAnalyze" class="primary">分析选中任务</button>
+        <button id="btnXlsx">导出 Excel</button>
+        <button id="btnCsv">导出 CSV</button>
+        <button id="btnHtml">导出 HTML 报告</button>
+        <span class="spacer" style="flex:1"></span>
+        <span class="mut" id="curTask">未选中任务</span>
+      </div>
+    </div>
+
+    <div id="result">
+      <div class="empty">先在左侧采集或导入评论，然后点「分析选中任务」</div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+<script src="/vendor/echarts.min.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
