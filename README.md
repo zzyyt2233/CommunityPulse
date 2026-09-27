@@ -79,11 +79,9 @@
 界面上「目标 / 实得」旁会同时显示**该来源评论总量**和本次覆盖百分比，
 方便判断"是没抓到，还是本来就这么多"。
 
-设置面板在左栏底部，Cookie 只存在本机 `data\settings.json`。
 
----
 
-## 三、能看到什么
+#三、能看到什么
 
 | 模块 | 说明 |
 |---|---|
@@ -99,11 +97,11 @@
 
 ---
 
-## 四、各平台接入情况（重要）
+四、各平台接入情况
 
 | 平台 | 方式 | 状态 |
 |---|---|---|
-| **B站** | WBI 签名接口（`/x/v2/reply/wbi/main`），失败降级老接口 | ✅ **匿名即可大量翻页**，含楼中楼 |
+|B站* | WBI 签名接口（`/x/v2/reply/wbi/main`），失败降级老接口 | ✅ **匿名即可大量翻页**，含楼中楼 |
 | **Steam** | 商店评测官方接口 | ✅ 稳定，可跨语言 |
 | **Reddit** | 帖子 `.json` | ✅ 稳定 |
 | **YouTube** | 官方 API（需在设置填 Key） | ✅ 需 API Key |
@@ -113,158 +111,6 @@
 | **抖音 / 小红书** | 浏览器采集助手（见第五节） | 🔧 服务端不直连，用你自己浏览器导出 JSON |
 | **任意网页** | 通用评论区抽取 | 兜底，抓不到结构化数据时切正文候选句 |
 
-### B站为什么以前只能抓几条
 
-老接口 `/x/v2/reply` 对**未登录访客只返回 3 条主评论**，第 2 页起返回空数组但 `code=0`
-（静默给空，不报错），所以工具看起来"只能抓 9 条"。
 
-改用 WBI 签名接口后，同样匿名也能一页 20 条连续翻页。同一支视频实测：
 
-| | 老接口 | WBI 接口 |
-|---|---|---|
-| 匿名可抓 | **9 条** | **1400+ 条**（实测目标 500 → 实得 500，7.9~14.7s） |
-| 平台评论总量 | 拿不到 | ✅ `available` 字段（该视频 7900+ 条） |
-
-签名实现见 `app/collectors/bili_wbi.py`（标准 WBI 算法，非逆向黑盒）。**仍然建议填 Cookie**：
-登录后能拿到更完整的楼中楼，`data/settings.json` 里写 `bilibili_cookie` 即可。
-
-### 微博为什么需要访客身份 / Cookie
-
-微博几乎所有数据接口都要求登录态：移动端 `m.weibo.cn` 未登录直接返回 **HTTP 432**，
-PC 端 `weibo.com/ajax/*` 返回 `ok:-100` 并跳转 login.php。
-
-工具的做法是走微博**官方自己的游客签发流程**（浏览器未登录访问 weibo.com 时的同一条路径）：
-
-1. `GET  passport.weibo.com/visitor/genvisitor` → 拿到 `tid`
-2. `GET  passport.weibo.com/visitor/visitor?a=incarnate&t=<tid>` → 下发 `SUB` / `SUBP` cookie
-
-不需要账号、不破解任何签名（实现见 `app/collectors/weibo_visitor.py`，cookie 缓存 6 小时）。
-拿到访客身份后 `buildComments` 正常返回评论，**游客上限约 15 条**，同时能拿到评论总数和 IP 属地。
-要突破这个上限就在设置里填 `weibo_cookie`（登录微博后 F12 → Network 复制任意请求的 Cookie 请求头）。
-
-> 说明：平台的网页结构随时可能改版，解析类采集器失效是正常现象。
-> 手动导入通道永远可用，是这些平台的兜底方案。
-
----
-
-## 五、抖音 / 小红书：浏览器采集助手
-
-这两个平台有签名风控（`a_bogus` / `x-s`），服务端直连要么不可靠、要么需要破解签名。
-工具不这么做，改成**用你自己的浏览器和登录态采集**：
-
-1. 点左侧「手动导入」里的 **复制浏览器采集脚本** 按钮（脚本本体：`web\snippets\browser_capture.js`）
-2. 在 Chrome/Edge 打开目标视频 / 笔记页（建议先登录）
-3. `F12` → `Console` → 粘贴 → 回车 → 输入目标条数
-4. 脚本自动滚动加载评论，跑完自动下载 `comments_xxx.json`
-5. 把这个 JSON 拖进「手动导入」文本框 → 导入即自动分析
-
-它不改任何请求、不算签名，只是把你浏览器**本来就会收到**的评论数据拦下来汇总，
-属于正常浏览行为。
-
-> **合规提醒**：社区里流传的 MediaCrawler 等方案 License 是
-> 「NON-COMMERCIAL LEARNING LICENSE」，明确**禁止用于商业用途**。
-> 本项目不引入、不依赖其代码，上述浏览器方案也规避了这个问题。
-> 无论用哪种方式，请遵守平台条款、控制频率，别做大批量爬取。
-
----
-
-## 五、分析原理（可按需改）
-
-- **分词**：jieba + 游戏领域词典 `app/analysis/dict/userdict.txt`（氪金/保底/掉帧/长草…）。
-  没装 jieba 时自动降级为内置最大匹配，不影响使用。
-- **情感**：词典规则打分（情感词 × 程度副词 × 否定），并处理「爆率感人」这类反讽。
-- **诉求概念归一**：`app/analysis/lexicon.py` 的 `CONCEPTS` 把「爆率/出货/沉船」等说法
-  映射到同一概念，这是相似句聚类能抓住"用词不同但诉求相同"的关键。
-- **吐槽点**：`TOPIC_RULES` 关键词桶，可在界面传自定义规则覆盖。
-
-换游戏项目时，改这几个文件里的词表即可，改完重启服务生效。
-
----
-
-## 六、目录结构
-
-```
-CommunityPulse
-├─ 启动.bat              双击启动
-├─ venv\                 Python 虚拟环境
-├─ app\
-│  ├─ server.py          Web 服务（标准库实现，零额外依赖）
-│  ├─ core\              配置 / SQLite / HTTP 客户端
-│  ├─ collectors\        各平台采集器 + 通用兜底 + 导入解析
-│  ├─ analysis\          分词 / 词频 / 聚类 / 情感 / 主题 / 流水线
-│  └─ export\            Excel / CSV / HTML 报告
-├─ web\                  前端页面（含本地 ECharts，离线可用）
-├─ data\                 数据库 pulse.db、导出文件、设置
-└─ tools\smoke_test.py   冒烟测试（改代码后跑一下）
-```
-
-改完代码跑：`venv\Scripts\python.exe tools\smoke_test.py`
-
----
-
-## 七、要把工具发给别人 / 传到 GitHub
-
-### 千万别直接压缩整个文件夹
-
-看起来最省事的做法其实是三个坑：
-
-| 坑 | 后果 |
-|---|---|
-| `venv\pyvenv.cfg` 里写死了**你这台机器**的 Python 绝对路径 | 收件人的 `venv\Scripts\python.exe` 直接报 `did not find executable`，退出码 103，完全起不来 |
-| `data\browser-profile*\` 是**你登录过的浏览器配置**（含各平台 Cookie） | 发出去等于把登录态送人 |
-| `data\pulse.db` 是你的采集数据 | 个人数据外泄；整包还会变成 180MB+ |
-
-### 正确做法：用打包脚本
-
-```bat
-python tools\make_dist.py --portable       :: 免安装版，16 MB —— 发给别人用这个
-python tools\make_dist.py                  :: 干净包，0.5 MB，收件人需自己装 Python + 联网装依赖
-python tools\make_dist.py --with-wheels    :: 离线包，20 MB，收件人需装 Python 但不用联网
-```
-
-产出在 `dist\CommunityPulse-日期.zip`。
-
-### 免安装版（`--portable`）—— 推荐
-
-把 **Python 解释器本身**打进了包里（用的是官方「嵌入式 Python」，解压即用、
-不写注册表、不需要管理员权限），依赖也预先解包好了。收件人：
-
-1. 解压
-2. 双击 `启动.bat`
-
-就这两步。**不用装 Python，不用联网，不用配置任何东西。**
-
-`启动.bat` 会自己判断：有 `runtime\py\python.exe` 就直接用（免安装），
-没有才退回「系统 Python + 建 venv + 装依赖」那条路。所以三种包共用同一个启动脚本。
-
-### 隐私是隔离的
-
-打包时排除了 `data\`，所以**你登录过的浏览器 profile、各平台 Cookie、采集数据一条都不会出去**。
-收件人登录后，Cookie 写在他自己电脑的 `data\settings.json`，浏览器采集用的 profile 也建在他本地
-——**两台机器的登录状态完全独立，互不干扰。**
-
-### 免安装版的技术细节
-
-| 项 | 做法 |
-|---|---|
-| Python | 官方 embed-amd64（3.13.14），约 11MB，含 `sqlite3` / `ssl` / `socket` |
-| 依赖 | 全部是纯 Python wheel（`py3-none-any`），直接解包成目录，不需要 pip（嵌入式版本也没有 pip） |
-| 模块搜索路径 | 改写 `python313._pth` 加入 `site-packages`——嵌入式 Python **忽略 PYTHONPATH**，必须改这个文件 |
-| 瘦身 | 砍掉 `jieba\lac_small`（paddle 模型 12MB）与 `jieba\analyse\idf.txt`（6MB），本工具都用不到，省 18MB |
-
-> 免安装版目前只覆盖 Windows（嵌入式 Python 只有 Windows 版）。
-> macOS / Linux 用户仍走 `启动.sh`（需要系统 Python 3.9+）。
->
-> 嵌入式 Python 是 64 位 x86；对方若是 32 位 Windows 或 ARM 版 Windows，改用另外两个包。
-
-### 传到 GitHub 上传什么
-
-`.gitignore` 已经排除了 `venv/`、`data/`、`logs/`、`__pycache__/`，所以直接：
-
-```bat
-git add . && git commit -m "..." && git push
-```
-
-就能只传代码。**不要**把 `venv/` 和 `data/` 提交上去——前者绑死你的机器路径，后者有你的登录 Cookie。
-
-收件人走「克隆仓库 → 双击 `启动.bat`」这条路，效果和收压缩包完全一样。
