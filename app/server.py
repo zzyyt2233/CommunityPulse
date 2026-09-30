@@ -300,10 +300,12 @@ def _run_collect_multi(task_id: int, urls: list[str], limit: int, settings: dict
         got = db.count_comments(task_id)
         if incremental:
             msg = f"重新采集完成：新增 {total_added} 条（累计 {got} 条）"
+        elif len(urls) > 1:
+            # 目标条数是「每个来源」的，不是总量。写成「实得 2400 / 目标 300」
+            # 会被读成超抓了 8 倍，这里把口径点明。
+            msg = f"共 {len(urls)} 个来源，每个来源目标 {limit} 条，实得 {got} 条"
         else:
             msg = f"实得 {got} / 目标 {limit} 条"
-        if len(urls) > 1:
-            msg = f"共 {len(urls)} 个来源，{msg}"
         if availables:
             msg += f"（平台显示评论总量 {sum(availables)} 条）"
         if reasons:

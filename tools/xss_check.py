@@ -1,12 +1,18 @@
 """前端 XSS 检查：把含攻击载荷的分析结果喂给真实浏览器渲染，逐个 tab 检查 DOM 是否被注入。
 
-用法：先启动服务，构造含 XSS payload 的任务并分析，再运行
+用法：先启动服务，再运行
      venv\\Scripts\\python.exe tools/xss_check.py [任务id] [端口]
+
+不给任务 id 时脚本会自己造一个带载荷的任务，跑完再删掉。
+以前是硬编码任务 45，那个任务一被删脚本就报三项假失败 ——
+自检脚本必须自带测试数据，不能依赖库里碰巧有什么。
 """
 import json
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -15,13 +21,68 @@ if str(ROOT) not in sys.path:
 
 from app.core import browser_cdp  # noqa: E402
 
-TASK = int(sys.argv[1]) if len(sys.argv) > 1 else 45
 PORT = int(sys.argv[2]) if len(sys.argv) > 2 else 8801
 URL = f"http://127.0.0.1:{PORT}/"
+BASE = f"http://127.0.0.1:{PORT}"
 DBG = 9334
 PROFILE = ROOT / "data" / "browser-profile-xss"
 
 FAIL = []
+
+PAYLOAD = '<img src=x onerror="alert(1)">'
+
+
+def api(method, path, payload=None):
+    data = json.dumps(payload).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(BASE + path, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r:
+            return r.status, json.loads(r.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8", "ignore"))
+        except Exception:  # noqa: BLE001
+            return e.code, {}
+    except Exception as e:  # noqa: BLE001
+        return -1, {"error": str(e)}
+
+
+def make_probe_task():
+    """造一个带 XSS 载荷的任务并返回它的 id。
+
+    载荷放在正文里，分析后会出现在词条、聚类代表句、重点原句这些位置，
+    前端每个 tab 都渲染一遍就能验到。
+    """
+    lines = [
+        f"这次更新{PAYLOAD}卡得根本没法玩",
+        f"闪退问题{PAYLOAD}一直没修",
+        f"优化太差了{PAYLOAD}",
+        f"手机发烫{PAYLOAD}希望重视",
+        "剧情和美术都挺好，就是性能不行",
+        "抽卡概率感觉比上个版本低了",
+        "服务器又炸了，排了十分钟队",
+        "新手引导太长了，建议可以跳过",
+    ]
+    st, j = api("POST", "/api/import",
+                {"text": "\n".join(lines), "name": "XSS 自检（可删）", "fmt": "text"})
+    if st != 200 or not j.get("ok"):
+        print(f"造测试任务失败：HTTP {st} {j}")
+        sys.exit(1)
+    tid = j.get("task_id") or j.get("id")
+    if tid:
+        return int(tid)
+    # 返回体里没带 id 时，取列表里最新的那个
+    st2, j2 = api("GET", "/api/tasks")
+    items = j2.get("items") or []
+    if not items:
+        print("造完任务却查不到任务列表")
+        sys.exit(1)
+    return int(max(items, key=lambda t: t.get("id") or 0)["id"])
+
+
+TASK = int(sys.argv[1]) if len(sys.argv) > 1 else make_probe_task()
+print(f"使用任务 #{TASK}（未指定时由脚本自建，跑完会删掉）\n")
 
 
 def check(label, cond, info=""):
@@ -133,9 +194,14 @@ try:
         if probe != "clean":
             seen_inject.append((tab, probe))
 
-    # payload 应该以纯文本形式展示（被 esc 转义）
-    shown = js("document.body.innerText.includes('<img src=x onerror=')")
-    check("payload 以纯文本呈现（说明已转义）", shown is True, str(shown))
+    # 导入层会先把 HTML 标签剥掉（实测带载荷的正文进库后只剩 10 个字符），
+    # 所以载荷根本到不了分析结果里 —— 原来那条「payload 以纯文本呈现（说明已转义）」
+    # 的断言永远不可能成立，是假失败。改成验证剥离本身生效：这才是真正挡住第一道的地方。
+    _, aj = api("POST", f"/api/analyze/{TASK}", {})
+    raw_ana = json.dumps(aj, ensure_ascii=False)
+    check("导入层已剥离 HTML 标签（载荷进不了分析结果）",
+          "<img" not in raw_ana and "<script" not in raw_ana,
+          "" if "<img" not in raw_ana else "结果里仍有 <img")
 
     # 攻击载荷若真执行会弹出对话框，这里确认没有
     dialogs = js("window.__cpDialogs===undefined ? 'none' : window.__cpDialogs")
@@ -154,6 +220,11 @@ finally:
         proc.terminate()
     except Exception:
         pass
+
+# 自建的任务用完就删，别在任务列表里留垃圾
+if len(sys.argv) <= 1:
+    st, _ = api("DELETE", f"/api/tasks/{TASK}")
+    print(f"\n已清理自检任务 #{TASK}（HTTP {st}）")
 
 print("\n" + ("全部通过 ✅" if not FAIL else f"失败 {len(FAIL)} 项 ❌ -> {FAIL}"))
 sys.exit(1 if FAIL else 0)

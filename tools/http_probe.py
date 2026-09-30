@@ -53,11 +53,21 @@ def expect(label, cond, info=""):
         FAIL.append(label)
 
 
-TASK = 15  # 原神，7.0 相关舆情：2700 条、已分析过
-
 s, j0 = hit("GET", "/api/tasks")
 BASE_IDS = {t["id"] for t in (j0.get("items") or [])}
-print(f"巡检基线：{len(BASE_IDS)} 个任务\n")
+
+# 巡检要一个「有评论、能分析」的任务来打各种读接口。
+# 以前写死 TASK=15，那个任务一被删整套巡检就崩 —— 改成自动挑：
+# 优先已完成、然后评论最多的那个。
+_cands = [t for t in (j0.get("items") or []) if (t.get("total") or 0) > 0]
+_cands.sort(key=lambda t: (t.get("status") != "done", -(t.get("total") or 0)))
+if not _cands:
+    print("库里没有带评论的任务，无法巡检读接口。")
+    print("先在界面上导入几条评论（或用「手动导入」），再跑本脚本。")
+    sys.exit(1)
+TASK = _cands[0]["id"]
+print(f"巡检基线：{len(BASE_IDS)} 个任务，读接口用任务 #{TASK}"
+      f"（{_cands[0].get('status')}，{_cands[0].get('total')} 条）\n")
 
 print("== GET 端点 ==")
 s, j = hit("GET", "/api/health")
