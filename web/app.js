@@ -17,6 +17,62 @@ async function api(path, opts) {
   return await r.json();
 }
 
+/* ---------- 自绘确认 / 输入弹窗 ----------
+   window.confirm / window.prompt 在内嵌预览窗口（iframe sandbox、部分 webview）
+   里会被静默禁用：删任务、粘贴 Cookie 时什么都不弹、直接 return，
+   看起来就像按钮坏了。这里用原生 <dialog> 自绘（纯 DOM，不受弹窗限制），
+   Promise 化之后调用处 await 一行。jsdom 等不支持 showModal 时降级 open 属性。 */
+function _dlg({ title, body = '', okText = '确定', danger = false, input = null }) {
+  return new Promise((resolve) => {
+    const d = document.createElement('dialog');
+    d.className = 'modal';
+    const t = document.createElement('p');
+    t.className = 'm-title';
+    t.textContent = title;
+    d.appendChild(t);
+    if (body) {
+      const b = document.createElement('p');
+      b.className = 'm-body';
+      // 平台名、Cookie 示例都可能含特殊字符，一律 textContent
+      b.textContent = body;
+      d.appendChild(b);
+    }
+    let inp = null;
+    if (input !== null) {
+      inp = document.createElement('textarea');
+      inp.className = 'm-input';
+      inp.value = input;
+      inp.placeholder = input === '' ? '粘贴到这里' : '';
+      d.appendChild(inp);
+    }
+    const acts = document.createElement('div');
+    acts.className = 'm-acts';
+    const c = document.createElement('button');
+    c.textContent = '取消';
+    const k = document.createElement('button');
+    k.className = danger ? 'danger' : 'primary';
+    k.textContent = okText;
+    acts.appendChild(c);
+    acts.appendChild(k);
+    d.appendChild(acts);
+    let settled = false;
+    const done = (val) => { if (settled) return; settled = true; resolve(val); d.remove(); };
+    k.onclick = () => done(input !== null ? (inp.value || '') : true);
+    c.onclick = () => done(input !== null ? null : false);
+    d.addEventListener('cancel', () => done(input !== null ? null : false));
+    d.addEventListener('close', () => done(input !== null ? null : false));
+    document.body.appendChild(d);
+    try { d.showModal(); } catch (e) { d.setAttribute('open', ''); }
+    if (inp) { inp.focus(); } else { k.focus(); }
+  });
+}
+function appConfirm(title, body = '', okText = '确定') {
+  return _dlg({ title, body, okText, danger: true });
+}
+function appPrompt(title, def = '', body = '') {
+  return _dlg({ title, body, input: def, okText: '确定' });
+}
+
 /* ---------- 初始化 ---------- */
 async function init() {
   const h = await api('/api/health');
@@ -34,7 +90,9 @@ async function loadTasks() {
   const box = $('#taskList');
   if (!r.items || !r.items.length) { box.innerHTML = '<span class="mut">暂无任务</span>'; return; }
   box.innerHTML = r.items.map((t) => `
-    <div class="task ${state.taskId === t.id ? 'active' : ''}" data-id="${t.id}">
+    <div class="task ${state.taskId === t.id ? 'active' : ''}" data-id="${t.id}"
+         role="button" tabindex="0"
+         aria-label="选中任务 ${esc(t.name || t.source_url || '未命名')}，${t.total || 0} 条评论">
       <div class="t1">
         <b title="${esc(t.source_url || '')}">${esc(t.name || t.source_url || '未命名')}</b>
         <span class="status ${t.status}">${{ running: '进行中', done: '完成', error: '失败', pending: '排队' }[t.status] || t.status}</span>
@@ -56,6 +114,15 @@ async function loadTasks() {
       state.taskId = id;
       $('#curTask').textContent = '已选任务 #' + id;
       loadTasks();
+    };
+    // 卡片选中是 div 模拟的按钮：回车 / 空格同样能选中（WCAG 2.1.1）
+    el.onkeydown = (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        state.taskId = +el.dataset.id;
+        $('#curTask').textContent = '已选任务 #' + el.dataset.id;
+        loadTasks();
+      }
     };
   });
 }
@@ -216,7 +283,7 @@ $('#btnDiscover').onclick = async () => {
 if ($('#btnDiscoverOnly')) { $('#btnDiscoverOnly').onclick = $('#btnDiscover').onclick; }
 
 async function delTask(id) {
-  if (!confirm('确认删除该任务及其评论？')) return;
+  if (!await appConfirm('删除任务？', '该任务及其全部评论都会删掉，不可恢复。', '删除')) return;
   await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
   if (state.taskId === id) { state.taskId = null; $('#curTask').textContent = '未选中任务'; }
   loadTasks();
@@ -461,10 +528,10 @@ async function runAnalyze(id) {
   // 采集还在进行：不静默按当前数据出结果，先说清楚代价再让用户决定
   if (!r.ok && r.code === 'collecting') {
     const tgt = r.target ? ` / 目标 ${r.target} 条` : '';
-    const go = confirm(
-      `任务 #${id} 还在采集中（已入库 ${r.collected} 条${tgt}）。\n\n` +
-      `现在分析只会覆盖这部分数据，采完后需要重新分析才能得到全量结果。\n\n` +
-      `仍要分析当前数据吗？`);
+    const go = await appConfirm(
+      `任务 #${id} 还在采集中`,
+      `已入库 ${r.collected} 条${tgt}。现在分析只会覆盖这部分数据，采完后需要重新分析才能得到全量结果。仍要分析当前数据吗？`,
+      '仍要分析');
     if (!go) { loadTasks(); return; }
     r = await api(`/api/analyze/${id}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -522,7 +589,7 @@ function render() {
   $('#result').innerHTML = kpi + `
     <div class="panel">
       ${scopeTip}${noteHtml}
-      <div class="tabs">${tabs.map(([k, n]) => `<button data-tab="${k}" class="${state.tab === k ? 'active' : ''}">${n}</button>`).join('')}</div>
+      <div class="tabs" role="tablist" aria-label="分析结果页签">${tabs.map(([k, n]) => `<button data-tab="${k}" role="tab" aria-selected="${state.tab === k}" class="${state.tab === k ? 'active' : ''}">${n}</button>`).join('')}</div>
       <div id="tabBody"></div>
     </div>`;
   $('#result').querySelectorAll('.tabs button').forEach((b) => {
@@ -551,7 +618,10 @@ function _sentChipHtml(k) {
   const tip = k.memory_label
     ? `已记住为「${LBL[lbl]}」（点击切换）`
     : `自动判定「${LBL[lbl]}」，点击可改并记忆`;
-  return `<span class="sent-chip ${lbl}" data-w="${esc(k.word)}" title="${tip}">${LBL[lbl]}</span>`;
+  // role=button + tabindex：纯 span 点击对键盘用户不可达（WCAG 2.1.1）
+  return `<span class="sent-chip ${lbl}" data-w="${esc(k.word)}" title="${tip}"
+    role="button" tabindex="0"
+    aria-label="情感标签：${LBL[lbl]}，按回车切换成${LBL[SENT_CYCLE[(SENT_CYCLE.indexOf(lbl) + 1) % SENT_CYCLE.length]]}">${LBL[lbl]}</span>`;
 }
 
 async function _cycleSentiment(word, el) {
@@ -584,7 +654,9 @@ function _stmtChipHtml(x) {
     : `自动判定「${LBL[lbl]}」，点击可改并记住这条评论`;
   const attr = x.key ? `data-key="${esc(x.key)}"` : '';
   const cls = x.mem_label ? 'memorized' : '';
-  return `<span class="sent-chip ${lbl} ${cls}" ${attr} title="${tip}">${LBL[lbl]}</span>`;
+  return `<span class="sent-chip ${lbl} ${cls}" ${attr} title="${tip}"
+    ${x.key ? 'role="button" tabindex="0"' : ''}
+    ${x.key ? `aria-label="这条评论的情感：${LBL[lbl]}，按回车切换"` : ''}>${LBL[lbl]}</span>`;
 }
 
 async function _cycleStmt(key, el) {
@@ -611,12 +683,19 @@ function _bindStmtChips(root) {
   root.querySelectorAll('.sent-chip[data-key]').forEach((el) => {
     el.onclick = (ev) => { ev.stopPropagation(); _cycleStmt(el.dataset.key, el); };
   });
+  // role=button 的 span 没有原生键盘行为：回车 / 空格转成 click，
+  // 让它走上原有的 onclick（或 .kw 卡的事件代理），键盘鼠标一条路
+  root.querySelectorAll('.sent-chip[role="button"]').forEach((el) => {
+    el.onkeydown = (ev) => {
+      if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); el.click(); }
+    };
+  });
 }
 
 function tabKeywords(body, d) {
   const top = (d.keywords || []).slice(0, 40);
   body.innerHTML = `
-    <div id="kwChart" class="chart"></div>
+    <div id="kwChart" class="chart" role="img" aria-label="高频词条柱状图，横条越长表示出现次数越多"></div>
     <h3 style="margin:16px 0 8px;font-size:14px">词条明细 <span class="tip">点击词条看原句；点击右侧标签可改情感并记忆</span></h3>
     <div class="kw-grid">${top.map((k) =>
       `<div class="kw" data-w="${esc(k.word)}"><b>${esc(k.word)}</b>${_sentChipHtml(k)}<span>${k.docs} 条</span></div>`).join('')}</div>
@@ -644,6 +723,18 @@ function tabKeywords(body, d) {
   state.charts.kw = chart;
   body.querySelectorAll('.kw').forEach((el) => {
     el.style.cursor = 'pointer';
+    // 词条卡可点开原句：键盘也要能进（2.1.1）。卡内的情感标签是
+    // 独立按钮，Tab 会停在它上面，回车走它自己的切换逻辑
+    el.setAttribute('role', 'button');
+    el.tabIndex = 0;
+    el.setAttribute('aria-label', '查看包含「' + el.dataset.w + '」的原句');
+    el.onkeydown = (ev) => {
+      if (ev.target !== el) return;   // 焦点在卡内标签上时不抢
+      if (ev.key === 'Enter' || ev.key === ' ') {
+        ev.preventDefault();
+        showKeywordExamples(el.dataset.w, d);
+      }
+    };
     el.onclick = (ev) => {
       if (ev.target.classList.contains('sent-chip')) {
         ev.stopPropagation();
@@ -691,7 +782,7 @@ function tabSimilar(body, d) {
 function tabTopics(body, d) {
   const ts = d.topics || [];
   body.innerHTML = `
-    <div id="tpChart" class="chart sm"></div>
+    <div id="tpChart" class="chart sm" role="img" aria-label="吐槽点归类图表"></div>
     ${ts.map((t) => `
     <div class="card">
       <div class="ch">
@@ -723,7 +814,7 @@ function tabTopics(body, d) {
 function tabSentiment(body, d) {
   const s = d.stats;
   body.innerHTML = `
-    <div id="stChart" class="chart sm"></div>
+    <div id="stChart" class="chart sm" role="img" aria-label="情感分布图表"></div>
     <div class="row" style="gap:14px;align-items:flex-start;margin-top:10px">
       <div style="flex:1">
         <h3 style="font-size:14px;margin:0 0 8px">最负面原声 <span class="tip">点左侧标签可改情感并记住这条评论</span></h3>
@@ -760,7 +851,7 @@ function tabTrend(body, d) {
       <div class="mut" style="margin-top:8px">B站 / Steam / Reddit / 微博 等接口会带时间；手动导入时可用 CSV 的 time 列补上</div></div>`;
     return;
   }
-  body.innerHTML = '<div id="trChart" class="chart"></div>';
+  body.innerHTML = '<div id="trChart" class="chart" role="img" aria-label="声量趋势图，横轴为时间，纵轴为评论数"></div>';
   const chart = echarts.init(document.getElementById('trChart'));
   chart.setOption({
     tooltip: { trigger: 'axis' },
@@ -919,7 +1010,9 @@ async function credAction(key, act) {
     return loadSettings();
   }
   if (act === 'paste') {
-    const v = prompt(`${item.label}：粘贴 Cookie${item.kind === 'key' ? ' 或 API Key' : ''}\n\n${item.sample || ''}`, '');
+    const v = await appPrompt(
+      `${item.label}：粘贴${item.kind === 'key' ? ' API Key' : ' Cookie'}`,
+      '', item.sample || '');
     if (v === null) return;
     await api('/api/credentials/save', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },

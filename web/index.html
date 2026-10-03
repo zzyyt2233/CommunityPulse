@@ -11,28 +11,28 @@
   <h1>CommunityPulse</h1>
   <span class="sub">社区舆情雷达 · 评论采集 / 词条统计 / 相似句聚类 / 情感与吐槽点分析</span>
   <span class="spacer"></span>
-  <span class="sub" id="health">连接中…</span>
+  <span class="sub" id="health" aria-live="polite">连接中…</span>
 </header>
 
-<div class="layout">
+<main class="layout">
   <!-- 左栏 -->
-  <div>
+  <div aria-label="采集与设置">
     <div class="panel">
-      <h3>新建采集 <span class="tip">粘贴链接即可</span></h3>
-      <label>社区链接（每行一个，可一次填多个来源批量采集）</label>
+      <h2>新建采集 <span class="tip">粘贴链接即可</span></h2>
+      <label for="url">社区链接（每行一个，可一次填多个来源批量采集）</label>
       <textarea id="url" rows="5" placeholder="https://www.bilibili.com/video/BV...&#10;https://weibo.com/detail/xxxx"></textarea>
-      <div class="mut" id="urlCount" style="margin-top:4px;color:var(--brand)">尚未识别到链接</div>
+      <div class="mut" id="urlCount" aria-live="polite" style="margin-top:4px;color:var(--brand)">尚未识别到链接</div>
       <div class="row" style="margin-top:10px">
         <div>
-          <label>任务名称（可选）</label>
+          <label for="name">任务名称（可选）</label>
           <input type="text" id="name" placeholder="如：2.3版本 更新反馈">
         </div>
         <div style="max-width:120px">
-          <label>目标条数</label>
+          <label for="limit">目标条数</label>
           <input type="number" id="limit" value="300" min="10" max="20000">
         </div>
       </div>
-      <label>排序方式（决定取哪些评论）</label>
+      <label for="sortMode">排序方式（决定取哪些评论）</label>
       <select id="sortMode">
         <option value="hot">按热度排序，取前 N 条（推荐）</option>
         <option value="new">按时间排序，取最新 N 条</option>
@@ -47,14 +47,14 @@
     </div>
 
     <div class="panel">
-      <h3>关键词发现 <span class="tip">不知道盯哪些帖子时用</span></h3>
-      <label>搜索关键词（如游戏名、版本名）</label>
+      <h2>关键词发现 <span class="tip">不知道盯哪些帖子时用</span></h2>
+      <label for="kw">搜索关键词（如游戏名、版本名）</label>
       <div class="row">
         <input type="text" id="kw" placeholder="如：原神 卡顿">
         <button id="btnDiscover" class="ghost" style="max-width:96px">搜索</button>
       </div>
       <div class="row" style="margin-top:8px">
-        <select id="kwPlatform">
+        <select id="kwPlatform" aria-label="选择平台">
           <option value="bilibili">B站（匿名可用）</option>
           <option value="weibo">微博（需登录）</option>
           <option value="tieba">百度贴吧（需登录）</option>
@@ -65,11 +65,11 @@
           <option value="reddit">Reddit（海外）</option>
           <option value="steam">Steam（搜索常不可达）</option>
         </select>
-        <select id="kwSort">
+        <select id="kwSort" aria-label="排序方式">
           <option value="hot">按热度</option>
           <option value="new">按最新</option>
         </select>
-        <select id="kwLimit">
+        <select id="kwLimit" aria-label="结果条数">
           <option value="10">10 条</option>
           <option value="20" selected>20 条</option>
           <option value="30">30 条</option>
@@ -77,7 +77,7 @@
       </div>
       <div class="row" style="margin-top:8px">
         <div style="max-width:150px">
-          <label>热度前 N 个来源</label>
+          <label for="kwTopN">热度前 N 个来源</label>
           <select id="kwTopN">
             <option value="3">前 3 个</option>
             <option value="5" selected>前 5 个</option>
@@ -86,7 +86,7 @@
           </select>
         </div>
         <div style="max-width:150px">
-          <label>每个来源评论数</label>
+          <label for="kwComments">每个来源评论数</label>
           <input type="number" id="kwComments" value="300" min="10" max="20000">
         </div>
       </div>
@@ -98,7 +98,7 @@
     </div>
 
     <div class="panel">
-      <h3>平台支持情况 <span class="tip">悬停查看说明</span></h3>
+      <h2>平台支持情况 <span class="tip">悬停查看说明</span></h2>
       <div class="plat-list" id="platList"><span class="mut">加载中…</span></div>
       <div class="mut" style="margin-top:8px">
         <span class="chip stable">稳定接口</span>
@@ -109,11 +109,11 @@
     </div>
 
     <div class="panel">
-      <h3>手动导入 <span class="tip">抖音 / 小红书 等走这里</span></h3>
-      <label>粘贴评论（一行一条）或 CSV / JSON 内容</label>
+      <h2>手动导入 <span class="tip">抖音 / 小红书 等走这里</span></h2>
+      <label for="impText">粘贴评论（一行一条）或 CSV / JSON 内容</label>
       <textarea id="impText" placeholder="玩家A：这版本优化太差了&#10;玩家B：抽卡爆率一如既往的感人"></textarea>
       <div class="row" style="margin-top:8px">
-        <select id="impFmt">
+        <select id="impFmt" aria-label="导入格式">
           <option value="auto">自动识别</option>
           <option value="text">纯文本（一行一条）</option>
           <option value="csv">CSV</option>
@@ -131,16 +131,16 @@
     </div>
 
     <div class="panel">
-      <h3>任务列表</h3>
+      <h2>任务列表</h2>
       <div class="task-list" id="taskList"><span class="mut">暂无任务</span></div>
     </div>
 
     <div class="panel">
-      <h3>平台接入 <span class="tip">点登录 → 一键获取，就能抓完整评论区</span></h3>
+      <h2>平台接入 <span class="tip">点登录 → 一键获取，就能抓完整评论区</span></h2>
       <div id="credList" class="cred-list"><span class="mut">加载中…</span></div>
       <div class="row">
         <div>
-          <label>Steam 语言</label>
+          <label for="setSteamLang">Steam 语言</label>
           <select id="setSteamLang">
             <option value="all">全部语言</option>
             <option value="schinese">简体中文</option>
@@ -148,7 +148,7 @@
           </select>
         </div>
         <div>
-          <label>Steam 时间范围(天)</label>
+          <label for="setSteamDays">Steam 时间范围(天)</label>
           <input type="number" id="setSteamDays" value="365" min="1" max="3650">
         </div>
       </div>
@@ -166,24 +166,24 @@
   </div>
 
   <!-- 右栏 -->
-  <div>
+  <div aria-label="分析结果">
     <div class="panel">
-      <h3>分析设置</h3>
+      <h2>分析设置</h2>
       <div class="row">
         <div>
-          <label>相似句判定阈值（越低越宽松）</label>
+          <label for="threshold">相似句判定阈值（越低越宽松）</label>
           <input type="number" id="threshold" value="0.45" step="0.05" min="0.3" max="0.8">
         </div>
         <div>
-          <label>词条数量 Top N</label>
+          <label for="topN">词条数量 Top N</label>
           <input type="number" id="topN" value="60" min="10" max="200">
         </div>
         <div>
-          <label>额外停用词（空格分隔）</label>
+          <label for="stopwords">额外停用词（空格分隔）</label>
           <input type="text" id="stopwords" placeholder="如：本帖 楼主">
         </div>
         <div>
-          <label>仅分析热度前 N 条（0 = 全部）</label>
+          <label for="topLiked">仅分析热度前 N 条（0 = 全部）</label>
           <input type="number" id="topLiked" value="0" min="0" max="20000">
         </div>
       </div>
@@ -193,7 +193,7 @@
         <button id="btnCsv">导出 CSV</button>
         <button id="btnHtml">导出 HTML 报告</button>
         <span class="spacer" style="flex:1"></span>
-        <span class="mut" id="curTask">未选中任务</span>
+        <span class="mut" id="curTask" aria-live="polite">未选中任务</span>
       </div>
     </div>
 
@@ -201,9 +201,9 @@
       <div class="empty">先在左侧采集或导入评论，然后点「分析选中任务」</div>
     </div>
   </div>
-</div>
+</main>
 
-<div class="toast" id="toast"></div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/vendor/echarts.min.js"></script>
 <script src="/app.js"></script>
 </body>
