@@ -1,0 +1,97 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一个分支连续推送时，前面的跑还没有意义了，直接取消，省额度。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 矩阵的两个组合对应 README 里的两条安装路径：
+  #   minimal —— 一个第三方包都不装，也要能启动、能跑完整离线测试；
+  #   full    —— 按 requirements.txt 装齐，验证 jieba 分词和 Excel 导出这两条增强分支。
+  # 之所以把 minimal 单独作为一档而不是「顺手测一下」，是因为「零依赖可用」
+  # 是本项目对外承诺的一部分，承诺就得有门禁守着，不然某次改动悄悄引入
+  # 一个顶层 import 就破了，而 full 那一档永远是绿的，看不出来。
+  offline-tests:
+    name: 离线测试（${{ matrix.os }} / ${{ matrix.deps }}）
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        deps: [minimal, full]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 装依赖（full）
+        if: matrix.deps == 'full'
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 确认真的没装可选包（minimal）
+        if: matrix.deps == 'minimal'
+        shell: bash
+        run: |
+          # 不是走过场：requirements.txt 里那三个包一个都不许在
+          # （setup-python 自带 pip/setuptools，不在此列）。
+          for p in jieba openpyxl httpx; do
+            if python -c "import $p" 2>/dev/null; then
+              echo "::error::$p 不该出现在最小安装环境里"
+              exit 1
+            fi
+          done
+          echo "已确认：jieba / openpyxl / httpx 均未安装"
+
+      - name: 跑离线测试
+        shell: bash
+        run: python tools/run_tests.py
+
+      - name: 起服务并跑 HTTP 端点全量巡检
+        # 把「起服务」和「巡检」放进同一个 bash 步骤：服务用 & 后台拉起，
+        # 轮询健康后就地跑 http_probe，跑完 kill 掉。
+        # 原先是分两步——先起服务、下一步再巡检——但 CI 上跨步骤留的后台
+        # 进程不一定活到下个步骤（进程组会被回收），合在一起最稳；
+        # 而且 windows runner 的默认 shell 是 PowerShell，那些 `for` / `$(seq)` /
+        # `&` 都是 bash 语法，所以这两步统一显式声明 shell: bash（Git Bash
+        # 在 windows runner 上自带，ubuntu 上本来就是 bash，加了无副作用）。
+        # 健康检查的 JSON 走管道直传给 python（不落 /tmp 文件）：Git Bash 的
+        # curl 和原生 Windows 的 python 对 `/tmp` 的解析不一致，写文件再读
+        # 在 windows 上会找不到；服务端日志用相对路径 serve.log，两边 cwd
+        # 都是仓库根，解析一致。
+        shell: bash
+        env:
+          CP_PROBE_PORT: "8811"
+        run: |
+          python -c "from app.server import serve; serve(open_browser=False, port=8811)" \
+            > serve.log 2>&1 &
+          SRV=$!
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8811/api/health > /dev/null 2>&1; then
+              echo "服务就绪（${i}s）"; break
+            fi
+            sleep 1
+          done
+          curl -s http://127.0.0.1:8811/api/health \
+            | python -c "import sys, json; d=json.load(sys.stdin); assert d.get('ok') is True, d; print('健康检查通过；jieba 可用 =', d.get('jieba'))"
+          python tools/http_probe.py 8811
+          RC=$?
+          kill $SRV 2>/dev/null || true
+          exit $RC
+
+      - name: 巡检失败时把服务端日志打出来
+        if: failure()
+        shell: bash
+        run: cat serve.log 2>/dev/null || true

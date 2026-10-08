@@ -186,6 +186,10 @@
           <label for="topLiked">仅分析热度前 N 条（0 = 全部）</label>
           <input type="number" id="topLiked" value="0" min="0" max="20000">
         </div>
+        <div>
+          <label for="negRate">负面预警线（%，分析后超线报警）</label>
+          <input type="number" id="negRate" value="25" step="1" min="5" max="90">
+        </div>
       </div>
       <div class="row" style="margin-top:12px; align-items:center">
         <button id="btnAnalyze" class="primary">分析选中任务</button>

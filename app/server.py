@@ -24,7 +24,9 @@ from .analysis.sentiment import score_text
 from .collectors import all_collectors, parse_import, route
 from .collectors.discovery import PLATFORMS as DISCOVERY_PLATFORMS, search
 from .core import browser_cdp
-from .core.config import DATA_DIR, HOST, PORT, WEB_DIR, load_settings, save_settings
+from .core import logsetup
+from .core.config import (DATA_DIR, HOST, PORT, WEB_DIR, load_settings,
+                          lost_secrets, save_settings)
 from .core.credentials import ACCESS, BY_KEY, status_of, cookie_for
 from .export import EXPORT_DIR, to_csv, to_excel, to_html_report
 
@@ -102,6 +104,58 @@ def _reap_orphans(port: int) -> None:
         pass
 
 
+# 采集并发闸门：一个采集任务内部要连平台接口（浏览器采集还会占一个真实标签页），
+# 一次填十几个来源、或者手快连点几次「重采」，线程会一路涨下去。
+# 这里限住同时真正在跑的数量，多出来的排队等 —— 任务状态显示「排队」，
+# 而不是任务还没轮上就先挂着「进行中」。
+_COLLECT_MAX = 3
+_COLLECT_SLOTS = threading.BoundedSemaphore(_COLLECT_MAX)
+
+
+class _CollectGate:
+    """采集任务的槽位。拿不到就阻塞等，等到了再把状态改成「进行中」。
+
+    传 task_id=None 时不碰数据库：浏览器抓评论那条路径的任务状态在 _CAPTURE_JOBS 里。
+    """
+
+    def __init__(self, task_id: int | None = None):
+        self._task_id = task_id
+
+    def acquire(self):
+        if not _COLLECT_SLOTS.acquire(blocking=False):
+            # 先标成排队：界面要能区分「还没轮到」和「正在抓」
+            self._note("pending", f"排队中（同时最多 {_COLLECT_MAX} 个采集任务在跑）")
+            _COLLECT_SLOTS.acquire()
+        self._note("running", "开始采集…")
+        return self
+
+    def release(self) -> None:
+        _COLLECT_SLOTS.release()
+
+    # 支持 with 写法；函数体很长、不想整体缩进一级的地方用 acquire/release 也一样
+    def __enter__(self):
+        return self.acquire()
+
+    def __exit__(self, *exc):
+        self.release()
+        return False
+
+    def _note(self, status: str, message: str) -> None:
+        if not self._task_id:
+            return
+        try:
+            db.update_task(self._task_id, status=status, message=message)
+        except Exception:  # noqa: BLE001 - 状态写不进去，采集本身还是要跑
+            pass
+
+
+def _run_collect_gated(task_id: int, urls: list[str], limit: int, settings: dict,
+                       sort: str, incremental: bool = False) -> None:
+    """排队 → 开跑。线程直接指向 _run_collect_multi 的话，闸门没地方挂。"""
+    with _CollectGate(task_id):
+        _run_collect_multi(task_id, urls, limit, settings, sort, incremental)
+
+
 def start_browser_capture(platform: str, url: str, target: int) -> str:
     """后台启动浏览器采集，返回 job_id；前端轮询 /api/browser-capture/<id> 取结果。"""
     _prune_jobs()
@@ -111,14 +165,16 @@ def start_browser_capture(platform: str, url: str, target: int) -> str:
     base = f"http://{HOST}:{APP_PORT}/"
 
     def _run() -> None:
-        _CAPTURE_JOBS[job_id]["status"] = "running"
-        try:
-            r = browser_cdp.capture_via_browser(url, platform, target=target,
-                                                base_url=base, timeout=300)
-        except Exception as exc:  # noqa: BLE001
-            r = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        _CAPTURE_JOBS[job_id]["status"] = "done"
-        _CAPTURE_JOBS[job_id]["result"] = r
+        # 这条路径不落 tasks 表，任务在内存的 _CAPTURE_JOBS 里；排队期间保持 pending
+        with _CollectGate():
+            _CAPTURE_JOBS[job_id]["status"] = "running"
+            try:
+                r = browser_cdp.capture_via_browser(url, platform, target=target,
+                                                    base_url=base, timeout=300)
+            except Exception as exc:  # noqa: BLE001
+                r = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            _CAPTURE_JOBS[job_id]["status"] = "done"
+            _CAPTURE_JOBS[job_id]["result"] = r
 
     threading.Thread(target=_run, daemon=True).start()
     return job_id
@@ -149,67 +205,75 @@ def start_browser_keyword_collect(platform: str, keyword: str, top_n: int,
              "task_id": task_id}, **extra)
 
     def _run() -> None:
-        _CAPTURE_JOBS[job_id]["status"] = "running"
-        # 先建任务：搜索一返回就把它当作唯一容器，逐个来源往里追加评论
+        # 先把任务建出来（排队状态）：还没抢到槽位时，列表里也能看到它在排队
         task_id = db.create_task(
             f"{keyword} · {label or platform}热度前{top_n}", platform, "",
             {"limit": comment_limit, "sort": sort, "browser": True, "keyword": keyword,
-             "sources": [], "source_count": 0})
+             "sources": [], "source_count": 0},
+            status="pending")
         _CAPTURE_JOBS[job_id]["task_id"] = task_id
-        db.update_task(task_id, message=f"正在浏览器中搜索「{keyword}」…")
 
+        # 显式进出闸门：下面那几十行不想为了少一层缩进整块挪位置
+        gate = _CollectGate(task_id)
+        gate.acquire()
         try:
-            r = browser_cdp.search_via_browser(keyword, platform, top_n=top_n,
-                                               base_url=base, timeout=180)
-        except Exception as exc:  # noqa: BLE001
-            r = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-        if not r.get("ok"):
-            _fail(task_id, r.get("error") or "搜索失败")
-            return
+            _CAPTURE_JOBS[job_id]["status"] = "running"
+            db.update_task(task_id, message=f"正在浏览器中搜索「{keyword}」…")
 
-        urls = [u for u in (r.get("urls") or []) if u]
-        if not urls:
-            _fail(task_id, f"没有在浏览器里搜到「{keyword}」的相关来源")
-            return
-
-        # 来源写进任务参数：前端展示、「重新采集」复用、分析口径（每来源上限 × 来源数）
-        # browser=True 标记该任务走浏览器助手，recollect 会据此给出明确提示
-        db.update_task(task_id, source_url=urls[0], params=json.dumps({
-            "limit": comment_limit, "sort": sort, "browser": True, "keyword": keyword,
-            "sources": urls, "source_count": len(urls),
-        }, ensure_ascii=False))
-
-        fails: list[str] = []
-        for idx, u in enumerate(urls, 1):
-            db.update_task(task_id, message=f"[{idx}/{len(urls)}] 正在浏览器抓取评论…")
             try:
-                cr = browser_cdp.capture_via_browser(
-                    u, platform, target=comment_limit, base_url=base,
-                    timeout=240, task_id=task_id)
+                r = browser_cdp.search_via_browser(keyword, platform, top_n=top_n,
+                                                   base_url=base, timeout=180)
             except Exception as exc:  # noqa: BLE001
-                cr = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
-            got = db.count_comments(task_id)
-            if cr.get("ok"):
-                db.update_task(task_id, total=got, message=(
-                    f"[{idx}/{len(urls)}] 浏览器实得 {cr.get('count', 0)} 条"
-                    f"（任务累计 {got} 条）"))
-            else:
-                fails.append(f"来源{idx}：{cr.get('error', '采集失败')}")
-                db.update_task(task_id, total=got, message=(
-                    f"[{idx}/{len(urls)}] 采集失败，继续下一个…"))
+                r = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+            if not r.get("ok"):
+                _fail(task_id, r.get("error") or "搜索失败")
+                return
 
-        got = db.count_comments(task_id)
-        msg = f"共 {len(urls)} 个来源，浏览器实得 {got} 条"
-        if fails:
-            msg += "；未完成：" + " | ".join(fails[:2])
-        db.update_task(task_id, status="done", total=got,
-                       finished_at=time.time(), message=msg)
-        _CAPTURE_JOBS[job_id]["status"] = "done"
-        _CAPTURE_JOBS[job_id]["result"] = {
-            "ok": True, "keyword": keyword, "platform": platform,
-            "urls": urls, "task_id": task_id, "task_ids": [task_id],
-            "count": len(urls), "total": got, "fails": fails,
-        }
+            urls = [u for u in (r.get("urls") or []) if u]
+            if not urls:
+                _fail(task_id, f"没有在浏览器里搜到「{keyword}」的相关来源")
+                return
+
+            # 来源写进任务参数：前端展示、「重新采集」复用、分析口径（每来源上限 × 来源数）
+            # browser=True 标记该任务走浏览器助手，recollect 会据此给出明确提示
+            db.update_task(task_id, source_url=urls[0], params=json.dumps({
+                "limit": comment_limit, "sort": sort, "browser": True, "keyword": keyword,
+                "sources": urls, "source_count": len(urls),
+            }, ensure_ascii=False))
+
+            fails: list[str] = []
+            for idx, u in enumerate(urls, 1):
+                db.update_task(task_id, message=f"[{idx}/{len(urls)}] 正在浏览器抓取评论…")
+                try:
+                    cr = browser_cdp.capture_via_browser(
+                        u, platform, target=comment_limit, base_url=base,
+                        timeout=240, task_id=task_id)
+                except Exception as exc:  # noqa: BLE001
+                    cr = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+                got = db.count_comments(task_id)
+                if cr.get("ok"):
+                    db.update_task(task_id, total=got, message=(
+                        f"[{idx}/{len(urls)}] 浏览器实得 {cr.get('count', 0)} 条"
+                        f"（任务累计 {got} 条）"))
+                else:
+                    fails.append(f"来源{idx}：{cr.get('error', '采集失败')}")
+                    db.update_task(task_id, total=got, message=(
+                        f"[{idx}/{len(urls)}] 采集失败，继续下一个…"))
+
+            got = db.count_comments(task_id)
+            msg = f"共 {len(urls)} 个来源，浏览器实得 {got} 条"
+            if fails:
+                msg += "；未完成：" + " | ".join(fails[:2])
+            db.update_task(task_id, status="done", total=got,
+                           finished_at=time.time(), message=msg)
+            _CAPTURE_JOBS[job_id]["status"] = "done"
+            _CAPTURE_JOBS[job_id]["result"] = {
+                "ok": True, "keyword": keyword, "platform": platform,
+                "urls": urls, "task_id": task_id, "task_ids": [task_id],
+                "count": len(urls), "total": got, "fails": fails,
+            }
+        finally:
+            gate.release()
 
     threading.Thread(target=_run, daemon=True).start()
     return job_id
@@ -348,8 +412,10 @@ def start_collect(name: str, urls: list[str] | str, limit: int = 500,
     if c:
         platform = c.platform
     task_id = db.create_task(name or urls[0][:40], platform, urls[0],
-                             {"limit": limit, "sort": sort, "sources": urls})
-    t = threading.Thread(target=_run_collect_multi,
+                             {"limit": limit, "sort": sort, "sources": urls},
+                             status="pending")
+    # 线程里先排队等槽位（并发闸门），抢到了才把状态改成「进行中」
+    t = threading.Thread(target=_run_collect_gated,
                          args=(task_id, urls, limit, settings, sort, incremental),
                          daemon=True)
     t.start()
@@ -380,9 +446,9 @@ def recollect(task_id: int, limit: int = 500, sort: str = "hot") -> tuple[bool, 
         [task["source_url"]] if task.get("source_url") else [])
     if not urls:
         return False, "该任务没有可复用的来源链接"
-    db.update_task(task_id, status="running", message="正在重新采集…",
+    db.update_task(task_id, status="pending", message="排队中…",
                    finished_at=None)
-    t = threading.Thread(target=_run_collect_multi,
+    t = threading.Thread(target=_run_collect_gated,
                          args=(task_id, urls, limit, settings, sort, True),
                          daemon=True)
     t.start()
@@ -886,7 +952,8 @@ class Handler(BaseHTTPRequestHandler):
                 return
             # 采集尚未结束时不要静默出结果：那样只会分析到当前已入库的一小部分
             # （多来源任务往往只抓完第 1~2 个），很容易被误当成全量。前端据 code=collecting 二次确认。
-            if t.get("status") == "running" and not body.get("force"):
+            # pending 也算「没结束」—— 排在队里还没开抓，这时分析同样只能看到一小部分。
+            if t.get("status") in ("running", "pending") and not body.get("force"):
                 # params.limit 是「每个来源」的上限，乘来源数才是本次总目标，否则会出现「已入库 600 / 目标 300」的矛盾提示
                 target = 0
                 try:
@@ -1076,7 +1143,18 @@ def _bind(port: int, tries: int = 20) -> tuple[ThreadingHTTPServer, int]:
 
 
 def serve(open_browser: bool = True, port: int = PORT) -> None:
+    # 双击启动时输出只留在黑窗口里，关掉就没了。复制一份进 logs/app.log，
+    # 超 5MB 自动归档 —— 用户报「连不上/闪退」时至少有东西可查。
+    logsetup.install()
     db.init_db()
+    # 凭据是加密落盘的（见 core/secret.py）。换过机器或 Windows 账户会解不开，
+    # 提前说一声，免得用户以为「明明登录过，怎么又要登录」。
+    load_settings()
+    lost = lost_secrets()
+    if lost:
+        names = "、".join(lost[:3]) + ("…" if len(lost) > 3 else "")
+        print(f"  [提示] 有 {len(lost)} 项凭据在当前 Windows 账户下解不开（{names}），"
+              f"请到「平台接入」重新登录一次")
     global APP_PORT
     srv, port = _bind(port)
     APP_PORT = port

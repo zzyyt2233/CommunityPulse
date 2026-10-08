@@ -50,6 +50,11 @@ finally:
     time.sleep = _real_sleep
 
 print("capture_via_browser ->", res)
-assert res == {"ok": True, "count": 42, "task_id": 7}, res
+# 别拿整个 dict 做相等比较：接口里还有 total（追加模式下已入库条数），
+# 以后再加字段就会误判成失败。只验这次真正关心的三个值。
+assert res.get("ok") is True, res
+assert res.get("count") == 42, res
+assert res.get("task_id") == 7, res
+assert "total" in res, res
 assert _poll["n"] >= 2, "应该至少轮询两次（首次 null，二次完成）"
 print("OK: 注入+轮询闭环正确，poll 次数 =", _poll["n"])

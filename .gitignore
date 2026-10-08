@@ -11,6 +11,8 @@ venv/.deps_installed
 # ---- 运行时数据（含数据库、导出、浏览器 profile、你的 Cookie）----
 data/
 logs/
+# 测试临时目录（跑 tools/test_*.py 时建，跑完自清）
+temp/
 
 # ---- 打包产物（tools/make_dist.py 的输出，含 20MB 的离线 wheel）----
 dist/

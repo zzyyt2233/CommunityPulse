@@ -37,6 +37,9 @@ SKIP_DIRS = {
     "venv", ".venv", "data", "logs", "__pycache__", ".git",
     "dist", "build", ".idea", ".vscode", ".pytest_cache",
 }
+# data/ 单独拎出来：默认必排除（里面是采集数据和浏览器登录态），
+# 但 --include-data（仅供自己备份迁移）时要放行。见 collect_files 的用法。
+DATA_DIR = "data"
 # 文件后缀：跳过
 SKIP_SUFFIX = {".pyc", ".pyo", ".log", ".db", ".sqlite", ".sqlite3"}
 # 明确跳过的文件
@@ -98,16 +101,37 @@ README_TXT = """CommunityPulse 社区舆情雷达 —— 第一次使用请读�
 
 
 def collect_files(root: Path, include_data: bool) -> list[tuple[Path, str]]:
-    """返回 [(磁盘路径, zip 内的相对路径)]。"""
+    """返回 [(磁盘路径, zip 内的相对路径)]。
+
+    include_data=False（默认）：data/ 整个排除 —— 里面有采集数据和浏览器
+    登录态，发给别人等于泄漏账号。
+    include_data=True（--include-data，仅供自己备份迁移）：放行 data/，
+    但里面的 .db / .log 等仍按后缀规则过滤。
+
+    注意两处都不能漏：
+    1. data/ 必须在这里按开关放行，不能只留在 SKIP_DIRS 里 ——
+       这个参数一度被忽略，导致 --include-data 静默失效（包照样生成，
+       只是里面没有数据），备份时拿到的是空壳。
+    2. 放行 data/ 后，data/ 下的文件还要绕开 .db 后缀这道过滤 ——
+       备份的主体就是 pulse.db（采集的评论库），被 .db 一挡等于还是没备份到。
+       只对 data/ 里的文件豁免后缀过滤；data/ 外的 .db（比如别处残留的）
+       照旧排除。
+    tests/test_make_dist.py 正反两个方向都有断言守着。
+    """
     out: list[tuple[Path, str]] = []
     for p in sorted(root.rglob("*")):
         rel = p.relative_to(root)
         parts = rel.parts
-        if any(x in SKIP_DIRS for x in parts):
+        in_data = DATA_DIR in parts
+        if in_data and not include_data:
+            continue
+        skip_dirs = SKIP_DIRS - {DATA_DIR} if include_data else SKIP_DIRS
+        if any(x in skip_dirs for x in parts):
             continue
         if p.is_dir():
             continue
-        if p.suffix.lower() in SKIP_SUFFIX:
+        # data/ 内的文件豁免后缀过滤（--include-data 时），其余照旧
+        if p.suffix.lower() in SKIP_SUFFIX and not (include_data and in_data):
             continue
         if p.name in SKIP_FILES:
             continue

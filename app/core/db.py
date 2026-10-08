@@ -102,6 +102,9 @@ CREATE TABLE IF NOT EXISTS watchlist (
 def connect() -> Iterator[sqlite3.Connection]:
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
+    # busy_timeout 是每连接设置，必须在每个连接上执行 —— 它决定写锁被占时
+    # 等多久再放弃，是本进程内并发写不互踩的基础。
+    conn.execute("PRAGMA busy_timeout=30000")
     try:
         yield conn
         conn.commit()
@@ -111,15 +114,48 @@ def connect() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with connect() as conn:
+        # journal_mode 是**持久化在库文件里**的属性，切一次就跟着库走，
+        # 不需要每个连接都执行 —— 而这条 PRAGMA 执行时要拿排他锁，
+        # 所以放在 connect() 里会让并发连接互相抢锁。
+        #
+        # 关于 WAL（2026-10-04 实测后改回 rollback journal）：
+        # WAL 解决的是「采集在写、分析在读」的互锁，本来是好东西。但实测
+        # 本机环境下 WAL 库的并发写会大面积失败 —— 6 个线程同时插入，
+        # WAL 只成 1 个、其余全抛「attempt to write a readonly database」，
+        # 而 DELETE / TRUNCATE / 默认 rollback 三种模式同样测法是 6/6 成功。
+        # 一个刚建的全新空库也一样复现，所以不是这个库的问题，是 WAL 依赖的
+        # 共享内存（-shm）在本环境下受限。错开 0.15s 并发就正常，说明是
+        # 同一时刻的抢锁问题。
+        #
+        # 采集是批量写（一次几百条，写在单个事务里），分析是读为主，两者撞上的
+        # 窗口本来就小；而 WAL 一旦成为默认，任何一次并发写失败都是「采集任务
+        # 建不出来 / 评论写不进去」这种用户直接看得见的故障。宁可放弃那点并发
+        # 收益，换「一定写得进去」。
+        #
+        # 换回 rollback 后要显式降级，否则老库文件里记着还是 WAL。
+        mode = conn.execute("PRAGMA journal_mode=DELETE").fetchone()
+        # synchronous=NORMAL 在 rollback journal 下比 FULL 略快，
+        # 代价是掉电可能丢掉最后一个事务 —— 本地工具可接受。
+        conn.execute("PRAGMA synchronous=NORMAL")
         conn.executescript(_SCHEMA)
+    if mode and str(mode[0]).lower() == "wal":
+        print("  [提示] 数据库仍在 WAL 模式（切换失败），并发写入可能报只读错误")
 
 
-def create_task(name: str, platform: str, source_url: str, params: dict | None = None) -> int:
+def create_task(name: str, platform: str, source_url: str, params: dict | None = None,
+                status: str = "running") -> int:
+    """建任务并返回 id。
+
+    status 平时不用传。采集任务传 "pending"：同时能跑的采集有上限（并发闸门在
+    server.py），抢不到槽位的先排队，界面上老老实实显示「排队」，
+    而不是任务还没开始抓就先挂着「进行中」。
+    """
     with connect() as conn:
         cur = conn.execute(
             "INSERT INTO tasks (name, platform, source_url, status, params, created_at)"
-            " VALUES (?,?,?, 'running', ?, ?)",
-            (name, platform, source_url, json.dumps(params or {}, ensure_ascii=False), time.time()),
+            " VALUES (?,?,?,?,?,?)",
+            (name, platform, source_url, status,
+             json.dumps(params or {}, ensure_ascii=False), time.time()),
         )
         return int(cur.lastrowid)
 
@@ -140,16 +176,17 @@ def get_task(task_id: int) -> dict | None:
 
 
 def reap_running_tasks(message: str = "") -> int:
-    """把所有仍为 running 的任务标记为「已中断」，返回处理条数。
+    """把所有仍为 running / pending 的任务标记为「已中断」，返回处理条数。
 
     采集跑在内存线程里，进程一退出线程就没了，但任务状态会永远停在「进行中」：
     列表一直显示进行中，点「分析」还会被误判成「采集尚未完成」弹二次确认。
+    排队中（pending）的任务同理 —— 闸门槽位随进程一起没了，它也永远不会开跑。
     由启动流程在确认没有其他实例在跑时调用。
     """
     with connect() as conn:
         cur = conn.execute(
             "UPDATE tasks SET status='error', finished_at=?, message=?"
-            " WHERE status='running'",
+            " WHERE status IN ('running', 'pending')",
             (time.time(), message or
              "服务已重启，本次采集中断；点「分析」可查看已入库的数据"),
         )

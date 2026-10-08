@@ -7,6 +7,9 @@
 *.html text eol=lf
 *.css text eol=lf
 *.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.txt text eol=lf
 
 # 图标 / 二进制当作二进制处理，禁止被 diff 或换行转换破坏
 *.png binary

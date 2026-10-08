@@ -1,5 +1,13 @@
-"""HTTP 端点全量巡检：把服务端的每个路由都真实打一遍，确认无 5xx / 无异常字段。"""
+"""HTTP 端点全量巡检：把服务端的每个路由都真实打一遍，确认无 5xx / 无异常字段。
+
+用法：先启动服务，再运行本脚本
+     venv\\Scripts\\python.exe tools\\http_probe.py [端口]
+
+端口默认8801，也可以用 CP_PROBE_PORT 环境变量覆盖。CI 里服务跑在别的端口上，
+所以这个参数不是摆设 —— 之前写死 8801 的时候这套60多项断言根本进不了 CI。
+"""
 import json
+import os
 import sys
 import urllib.parse
 import urllib.request
@@ -9,8 +17,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-BASE = "http://127.0.0.1:8801"
-PORT = 8801
+# 优先级：命令行参数 > 环境变量 > 默认 8801。
+# 环境变量放中间是有意的：CI 里通常在 workflow 里 export 一个端口，
+# 而本地手动跑时可以直接 `python tools/http_probe.py 8899`。
+try:
+    PORT = int(sys.argv[1]) if len(sys.argv) > 1 else int(
+        os.environ.get("CP_PROBE_PORT") or 8801)
+except ValueError:
+    print(f"端口不是整数：{sys.argv[1] if len(sys.argv) > 1 else os.environ.get('CP_PROBE_PORT')}")
+    sys.exit(2)
+
+BASE = f"http://127.0.0.1:{PORT}"
 FAIL = []
 
 
@@ -53,6 +70,32 @@ def expect(label, cond, info=""):
         FAIL.append(label)
 
 
+def _seed_task():
+    """造一个带评论、能分析的任务。
+
+    走 /api/import（脚本里已经验证过的那条路），不直接调 db.insert_comments——
+    直接写库会绕过接口层的校验与默认值填充，而那些恰好是巡检要验的东西。
+    """
+    rows = [{"comment_id": f"seed{i}", "content": f"巡检自建样本 {i}，用于验证读接口。"}
+            for i in range(1, 7)]
+    s, j = hit("POST", "/api/import", {"text": json.dumps({
+        "platform": "douyin", "source_url": "seed", "source_title": "巡检自建",
+        "count": len(rows), "comments": rows}, ensure_ascii=False), "fmt": "json"})
+    if s != 200 or not isinstance(j, dict):
+        print(f"  造数据失败：HTTP {s} {str(j)[:120]}")
+        return None
+    tid = j.get("task_id")
+    if not tid:
+        print(f"  造数据返回里没有 task_id：{str(j)[:120]}")
+        return None
+    # 分析结果本身也是被巡检的对象（alerts / stats 都在读接口里验），
+    # 顺手跑一次，不然读接口只能验到「没有分析结果」那条分支。
+    s, _ = hit("POST", f"/api/analyze/{tid}", {})
+    if s != 200:
+        print(f"  分析失败：HTTP {s}（读接口仍可巡检，只是少了分析结果那几项）")
+    return tid
+
+
 s, j0 = hit("GET", "/api/tasks")
 BASE_IDS = {t["id"] for t in (j0.get("items") or [])}
 
@@ -61,10 +104,23 @@ BASE_IDS = {t["id"] for t in (j0.get("items") or [])}
 # 优先已完成、然后评论最多的那个。
 _cands = [t for t in (j0.get("items") or []) if (t.get("total") or 0) > 0]
 _cands.sort(key=lambda t: (t.get("status") != "done", -(t.get("total") or 0)))
+
+# 空库（CI 上就是空的）就自己造一个。自检脚本不能依赖「库里碰巧有什么」，
+# 那在本地靠运气、在 CI 上直接变成一条永远跑不到的分支。
+_seeded = None
+SEEDED_TASK = None
 if not _cands:
-    print("库里没有带评论的任务，无法巡检读接口。")
-    print("先在界面上导入几条评论（或用「手动导入」），再跑本脚本。")
-    sys.exit(1)
+    print("库里没有带评论的任务，自动造一个巡检用任务。")
+    SEEDED_TASK = _seed_task()
+    if not SEEDED_TASK:
+        print("造数据失败，无法巡检读接口。")
+        sys.exit(1)
+    s, j0 = hit("GET", "/api/tasks")
+    _cands = [t for t in (j0.get("items") or []) if (t.get("total") or 0) > 0]
+    _cands.sort(key=lambda t: (t.get("status") != "done", -(t.get("total") or 0)))
+    if not _cands:
+        print("造完数据仍找不到可用任务，放弃巡检。")
+        sys.exit(1)
 TASK = _cands[0]["id"]
 print(f"巡检基线：{len(BASE_IDS)} 个任务，读接口用任务 #{TASK}"
       f"（{_cands[0].get('status')}，{_cands[0].get('total')} 条）\n")
@@ -165,23 +221,37 @@ expect("发现未登录平台提示先登录", j.get("ok") is False and "登录"
        (j.get("error") or "")[:34])
 
 print("\n== POST 导出三格式 ==")
-for fmt, sig in (("xlsx", b"PK"), ("csv", None), ("html", b"<")):
+# xlsx 的断言不能问脚本自己「本机装没装 openpyxl」——巡检进程和被测服务
+# 未必在同一个环境里（本机调试时就是如此，CI 的 minimal 档更是另一个 venv）。
+# 问错对象的结果是：服务端已降级成 CSV，脚本却还以为该看到 PK 头。
+# 唯一可信的依据是服务端实际吐出来的东西 —— url 的扩展名。
+for fmt in ("xlsx", "csv", "html"):
     s, j = hit("GET", f"/api/export/{TASK}?fmt={fmt}")
     ok = s == 200 and j.get("ok") and j.get("url")
     expect(f"导出 {fmt}", ok, f"{j.get('name')}")
-    if ok:
-        # 服务端返回的 url 已是 percent-encoded 的（ früher 是裸中文，浏览器
-        # href 会帮忙转码但 fetch/地址栏不会）。这里验两种用法都拿得到文件：
-        #   1) 直接用（对应 <a href> 与 JS fetch）
-        #   2) 再编码一次（对应某些客户端二次编码）——服务端 unquote 只解一层，
-        #      二次编码必然 404，所以这里只要求「直接用」成功。
-        s2, body = hit("GET", j["url"], raw=True)
-        good = s2 == 200 and isinstance(body, bytes) and len(body) > 500 \
-            and (sig is None or body.startswith(sig))
-        expect(f"下载 {fmt}（中文名）", good, f"{len(body) if isinstance(body, bytes) else body} B")
-        # 裸中文路径也仍能容错（说明服务端做了 unquote）
-        is_enc = j["url"].replace("/exports/", "").startswith("%")
-        expect(f"导出 URL 已百分号编码（{fmt}）", is_enc)
+    if not ok:
+        continue
+    # 服务端返回的 url 已是 percent-encoded 的（早先是裸中文，浏览器
+    # href 会帮忙转码但 fetch/地址栏不会）。只要求「直接用」能拿到文件：
+    # 二次编码必然 404，因为服务端 unquote 只解一层。
+    s2, body = hit("GET", j["url"], raw=True)
+    got = (j.get("url") or "").rsplit(".", 1)[-1].lower()
+    # 未装 openpyxl 时 to_excel 会自动降级为 CSV（见 app/export/exporter.py），
+    # 这是一条该被承认的正常路径，不是缺陷。
+    expect(f"下载 {fmt}（中文名）",
+           s2 == 200 and isinstance(body, bytes) and len(body) > 500,
+           f"{len(body) if isinstance(body, bytes) else body} B"
+           + (f" → 实际 {got}" if got != fmt else ""))
+    # 文件魔数：光看「拿到了东西」不够，扩展名对内容坏掉的情况照样蒙混过关。
+    # xlsx 其实是 zip 容器（PK 头）；html 看有没有 <html。
+    MAGIC = {"xlsx": (b"PK", b"csv"), "csv": (None, None), "html": (b"<", None)}
+    sig, alt = MAGIC.get(got, (None, None))
+    if sig:
+        expect(f"{got} 内容确实是该格式（魔数校验）",
+               body.startswith(sig) or (alt and body.startswith(alt)),
+               f"实际魔数 {body[:4]!r}")
+    is_enc = j["url"].replace("/exports/", "").startswith("%")
+    expect(f"导出 URL 已百分号编码（{fmt}）", is_enc)
 
 print("\n== POST 重新分析 ==")
 s, j = hit("POST", f"/api/analyze/{TASK}", {})
@@ -268,7 +338,8 @@ except Exception as _e:  # noqa: BLE001
 expect("回收后任务仍完整可读", hit("GET", "/api/tasks")[0] == 200)
 
 print("\n== 清理巡检数据 ==")
-for tid in (j1.get("task_id"), j2.get("task_id"), jm.get("task_id")):
+# SEEDED_TASK 是空库时自建的，不删的话收尾的「任务数不泄漏」会把它当残留报 FAIL。
+for tid in (j1.get("task_id"), j2.get("task_id"), jm.get("task_id"), SEEDED_TASK):
     if tid:
         s, j = hit("DELETE", f"/api/tasks/{tid}")
         expect(f"删除巡检任务 #{tid}", s == 200 and j.get("ok") is True)

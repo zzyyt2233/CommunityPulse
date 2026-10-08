@@ -12,7 +12,15 @@ from .lexicon import (DEFAULT_TOPIC, DEGREE, INTENSIFIERS, IRONY_PHRASES, NEGATI
 from .text_utils import cut
 
 _EMOJI_POS = re.compile(r"\[(?:赞|喜欢|爱心|星星眼|good|支持|鼓掌|笑)\]|(?:\(\^_\^\)|/≧▽≦/)")
-_EMOJI_NEG = re.compile(r"\[(?:怒|泪|吐血|黑线|doge|滑稽|生气|难受|捂脸)\]|(?:orz|OTZ|-_-)")
+# 负面的表情码：这些表情本身就在表达不满。
+#
+# 注意 [doge] 和 [滑稽]、[捂脸] 不在这里。它们是最常见的玩梗表情，绝大多数
+# 出现在吐槽、抖机灵、阴阳怪气的句子里 —— 但句子的情绪是由文字承载的，表情
+# 只是语气助词。把它们算成 -0.6 会让「原神能切枪吗[doge]」这种纯玩笑话直接
+# 判负，B 站评论区里带 [doge] 的比例很高，等于系统性地把一大片中立评论刷成
+# 负面，负面率、预警、重点原句全跟着失真。
+# （它们也不会被漏掉：text_utils 分词时已经把表情码剔掉了，所以既不褒也不贬。）
+_EMOJI_NEG = re.compile(r"\[(?:怒|泪|吐血|黑线|生气|难受|大哭|崩溃)\]|(?:orz|OTZ|-_-)")
 
 
 def score_text(text: str, overrides: dict | None = None) -> tuple[str, float, list[str]]:

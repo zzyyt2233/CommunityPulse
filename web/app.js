@@ -514,11 +514,14 @@ $('#btnAnalyze').onclick = () => {
 };
 
 async function runAnalyze(id) {
+  const alertPct = +$('#negRate').value;
   const payload = {
     cluster_threshold: +$('#threshold').value || 0.45,
     top_n: +$('#topN').value || 60,
     extra_stopwords: $('#stopwords').value.trim(),
     top_liked_n: +$('#topLiked').value || 0,
+    // 后端按 0.05~0.9 夹取，这里只管把百分比换算成小数
+    ...(alertPct > 0 ? { neg_alert_rate: alertPct / 100 } : {}),
   };
   toast('分析中…');
   let r = await api(`/api/analyze/${id}`, {
@@ -549,6 +552,21 @@ async function runAnalyze(id) {
   } else {
     toast('分析完成');
   }
+}
+
+/* 负面预警条：先把结论摆出来，下面的 KPI 和图表再解释为什么 */
+const ALERT_LBL = { high: '需处理', medium: '留意', low: '可控' };
+
+function alertHtml(d) {
+  const a = d.alerts || {};
+  const lv = a.level;
+  if (!a.headline || !ALERT_LBL[lv]) return '';
+  const items = (a.items || []).map((it) => `
+    <li>${esc(it.label || '')}${it.detail ? `<span class="alert-detail"> — ${esc(it.detail)}</span>` : ''}</li>`).join('');
+  return `<div class="alert-bar ${lv}" role="status">
+    <div class="alert-head"><span class="alert-badge">${ALERT_LBL[lv]}</span><b>${esc(a.headline)}</b></div>
+    ${items ? `<ul>${items}</ul>` : ''}
+  </div>`;
 }
 
 /* ---------- 渲染 ---------- */
@@ -586,7 +604,7 @@ function render() {
     ['sent', '情感分布'], ['trend', '声量趋势'], ['hl', '重点原句'],
     ['cm', '评论逐条'],
   ];
-  $('#result').innerHTML = kpi + `
+  $('#result').innerHTML = alertHtml(d) + kpi + `
     <div class="panel">
       ${scopeTip}${noteHtml}
       <div class="tabs" role="tablist" aria-label="分析结果页签">${tabs.map(([k, n]) => `<button data-tab="${k}" role="tab" aria-selected="${state.tab === k}" class="${state.tab === k ? 'active' : ''}">${n}</button>`).join('')}</div>

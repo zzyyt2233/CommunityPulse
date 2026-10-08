@@ -16,6 +16,29 @@ from .text_utils import (char_ngrams, discover_new_words, extract_key_terms,
 
 # ---------------- 相似句聚类 ----------------
 
+# 负面占比的默认警戒线。超过就报 high，达到它的 60% 报 medium。
+# 前端可以在分析参数里传 neg_alert_rate 覆盖（不同项目容忍度不一样）。
+_ALERT_NEG_RATE = 0.25
+
+# 表情 / 贴纸 / 颜文字的方括号写法（[doge]、[笑哭]、[tv_委屈]）。
+_EMOJI_TOKEN_RE = re.compile(r"\[[^\[\]]{1,12}\]")
+# 预警里点名的话题，代表句至少得有这么多实字
+_MIN_REP_CHARS = 6
+
+
+def _readable_len(text: str) -> int:
+    """数一句话里有多少「真内容」：去掉表情方括号、标点和空白后剩下的字。
+
+    专门用来挡一类噪音簇 —— 一堆互不相关的玩笑评论，只因为都带 [doge]
+    就被聚到一起，代表句干脆就是「[doge]」。这种簇在情感判定里往往还挂着
+    一堆「负面」（表情和短句的组合容易被判负），于是就成了「30 条里 17 条
+    是负面」这种看着严重、点开发现毫无信息量的预警。把它报出去，等于占了
+    一个本该指向真问题的位置，还让用户白跑一趟。
+    """
+    body = _EMOJI_TOKEN_RE.sub("", text or "")
+    return len(re.sub(r"[^0-9A-Za-z\u4e00-\u9fff]", "", body))
+
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", "", (s or "").lower())
 
@@ -322,27 +345,33 @@ def analyze(comments: list[dict], params: dict | None = None) -> dict:
     dist = Counter(r["sentiment"] for r in rows)
     total = len(rows)
     times = [r.get("published_at") for r in rows if r.get("published_at")]
+    stats = {
+        "total": total,
+        "raw_total": len(comments),
+        "duplicates_merged": len(comments) - total,
+        "avg_length": round(sum(len(t) for t in texts) / total, 1),
+        "positive": dist.get("positive", 0),
+        "neutral": dist.get("neutral", 0),
+        "negative": dist.get("negative", 0),
+        "positive_rate": round(dist.get("positive", 0) / total, 3),
+        "negative_rate": round(dist.get("negative", 0) / total, 3),
+        "time_from": min(times) if times else None,
+        "time_to": max(times) if times else None,
+        "has_time": bool(times),
+        "pool_size": pool_size,
+        "top_liked_n": top_liked if (top_liked > 0 and likes_available) else 0,
+        "likes_available": likes_available,
+        "memory_marked": sum(1 for r in rows if r.get("mem_label")),
+    }
+
+    # 9) 负面预警：只从上面已经算好的结果派生，不额外跑一遍情感判定
+    alerts = _build_alerts(stats, clusters, p.get("neg_alert_rate"))
+
     return {
         "generated_at": time.time(),
         "params": p,
-        "stats": {
-            "total": total,
-            "raw_total": len(comments),
-            "duplicates_merged": len(comments) - total,
-            "avg_length": round(sum(len(t) for t in texts) / total, 1),
-            "positive": dist.get("positive", 0),
-            "neutral": dist.get("neutral", 0),
-            "negative": dist.get("negative", 0),
-            "positive_rate": round(dist.get("positive", 0) / total, 3),
-            "negative_rate": round(dist.get("negative", 0) / total, 3),
-            "time_from": min(times) if times else None,
-            "time_to": max(times) if times else None,
-            "has_time": bool(times),
-            "pool_size": pool_size,
-            "top_liked_n": top_liked if (top_liked > 0 and likes_available) else 0,
-            "likes_available": likes_available,
-            "memory_marked": sum(1 for r in rows if r.get("mem_label")),
-        },
+        "stats": stats,
+        "alerts": alerts,
         "notes": notes,
         "keywords": keywords,
         "new_words": new_words,
@@ -365,6 +394,70 @@ def analyze(comments: list[dict], params: dict | None = None) -> dict:
                                          key=lambda x: (-x["sent_score"], -int(x.get("like_count") or 0)))[:15]],
         },
     }
+
+
+def _build_alerts(stats: dict, clusters: list[dict], warn_at=None) -> dict:
+    """负面舆情预警：把「一眼就该看出来的事」挑出来，省得用户对着饼图自己数。
+
+    全部从已经算好的结果派生（stats 的情感分布 + clusters 的簇内分布），
+    不重新跑情感判定 —— 预警不该让分析变慢。
+
+    level: high 越过警戒线 / medium 接近 / low 可控 / none 没有数据
+    """
+    total = int(stats.get("total") or 0)
+    try:
+        rate_limit = float(warn_at) if warn_at is not None else _ALERT_NEG_RATE
+    except (TypeError, ValueError):
+        rate_limit = _ALERT_NEG_RATE
+    rate_limit = min(max(rate_limit, 0.05), 0.9)
+
+    if not total:
+        return {"level": "none", "headline": "", "items": [], "warn_at": rate_limit}
+
+    neg = int(stats.get("negative") or 0)
+    rate = neg / total
+
+    if rate >= rate_limit:
+        level = "high"
+        headline = f"负面占比 {rate:.1%}，已越过 {rate_limit:.0%} 的警戒线"
+    elif rate >= rate_limit * 0.6:
+        level = "medium"
+        headline = f"负面占比 {rate:.1%}，接近警戒线（{rate_limit:.0%}）"
+    else:
+        level = "low"
+        headline = f"负面占比 {rate:.1%}，整体在可控范围"
+
+    items = [{
+        "kind": "rate",
+        "label": f"负面 {neg} 条 / 共 {total} 条（{rate:.1%}）",
+        "detail": f"正面 {stats.get('positive', 0)} 条、中性 {stats.get('neutral', 0)} 条",
+    }]
+
+    # 负面扎堆的话题：条数够多、且以负面为主 —— 这才是运营真正要下手的地方
+    hot: list[tuple[int, int, dict]] = []
+    for c in clusters:
+        sent = c.get("sentiment") or {}
+        cnt_neg = int(sent.get("negative") or 0)
+        size = int(c.get("size") or 0)
+        if size < 3 or cnt_neg < 2 or cnt_neg / max(size, 1) < 0.5:
+            continue
+        rep = c.get("representative") or ""
+        # 代表句只是一串表情 / 太短，说明这簇的「中心」是表情而不是观点，
+        # 挂着的高负面多半是误判。宁可少报一条，也别报一条点开没内容的。
+        if _readable_len(rep) < _MIN_REP_CHARS:
+            continue
+        words = "、".join((c.get("keywords") or [])[:3]) or "（无明显关键词）"
+        hot.append((cnt_neg, size, {
+            "kind": "cluster",
+            "label": f"「{words}」一带 {size} 条里 {cnt_neg} 条是负面",
+            "detail": rep[:90],
+        }))
+    hot.sort(key=lambda t: (-t[0], -t[1]))
+    items.extend(d for _, _, d in hot[:3])
+    if hot:
+        headline += f"；负面集中在 {len(hot)} 个话题"
+
+    return {"level": level, "headline": headline, "items": items, "warn_at": rate_limit}
 
 
 def _build_trend(rows: list[dict]) -> dict:
@@ -422,6 +515,9 @@ def _build_highlights(rows: list[dict], clusters: list[dict]) -> list[dict]:
 
 def _empty_result(msg: str) -> dict:
     return {"generated_at": time.time(), "error": msg, "stats": {"total": 0},
+            # 空结果也带上 alerts，免得前端和导出各自判一次 None
+            "alerts": {"level": "none", "headline": "", "items": [],
+                       "warn_at": _ALERT_NEG_RATE},
             "keywords": [], "new_words": [], "phrases": [], "clusters": [],
             "topics": [], "trend": {"available": False, "points": []},
             "highlights": [], "sentiment_examples": {"negative": [], "positive": []}}

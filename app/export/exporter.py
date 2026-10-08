@@ -227,6 +227,21 @@ def to_html_report(task_name: str, analysis: dict, comments: list[dict]) -> Path
     scope_note = (f"（该任务共 {task_total} 条，本次分析仅覆盖 {st.get('raw_total', 0)} 条）"
                   if task_total > int(st.get("raw_total") or 0) else "")
 
+    # 负面预警摆在最前面：这份 HTML 是要发出去的，看的人未必会自己去读饼图
+    alerts = analysis.get("alerts") or {}
+    level = str(alerts.get("level") or "")
+    alert_html = ""
+    if level in ("high", "medium", "low") and alerts.get("headline"):
+        items = "".join(
+            f'<li>{e(str(it.get("label") or ""))}'
+            + (f'<span class="mut"> — {e(str(it.get("detail") or ""))}</span>'
+               if it.get("detail") else "")
+            + "</li>"
+            for it in (alerts.get("items") or [])
+        )
+        alert_html = (f'<div class="alert {level}"><b>{e(str(alerts["headline"]))}</b>'
+                      f'<ul>{items}</ul></div>')
+
     doc = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
 <title>{e(task_name)} - 社区舆情报告</title><style>
 *{{box-sizing:border-box}}body{{margin:0;padding:32px;background:#f5f6f8;color:#1f2328;
@@ -254,9 +269,15 @@ font-family:"Microsoft YaHei","PingFang SC",-apple-system,Segoe UI,sans-serif;li
 .tbar .neg{{position:absolute;bottom:0;width:100%;background:#d9534f;border-radius:0 0 3px 3px}}
 .tcol span{{font-size:9px;color:#8b9299;margin-top:3px;transform:rotate(-45deg)}}
 .foot{{margin-top:30px;font-size:12px;color:#9aa0a6;text-align:center}}
+.alert{{border:1px solid;border-radius:10px;padding:12px 16px;margin:14px 0;font-size:13px}}
+.alert ul{{margin:6px 0 0;padding-left:20px}}.alert li{{margin:3px 0}}
+.alert.high{{background:#fdeaea;border-color:#f3c4c2;color:#a53834}}
+.alert.medium{{background:#fff8e6;border-color:#f0d9a8;color:#8a6314}}
+.alert.low{{background:#eef7f0;border-color:#c6e0cd;color:#2f6b3d}}
 </style></head><body><div class="wrap">
 <h1>{e(task_name)} · 社区舆情报告</h1>
 <div class="mut">生成时间 {time.strftime('%Y-%m-%d %H:%M:%S')} ｜ 有效样本 {st.get('total', 0)} 条{scope_note}</div>
+{alert_html}
 <div class="kpis">
 <div class="kpi"><b>{st.get('total', 0)}</b><span>有效评论</span></div>
 <div class="kpi"><b>{st.get('positive_rate', 0) * 100:.0f}%</b><span>好评率</span></div>
