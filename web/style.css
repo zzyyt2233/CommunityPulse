@@ -8,7 +8,7 @@
   /* --text-3 原 #8b9299 在白底只有约 3.2:1，一大半说明文字是 11~12px，
      WCAG 2.2 AA（1.4.3）正文要求 4.5:1；加深到白底约 4.7:1 */
   --text-3: #6a7178;
-  --brand: #3b6fd4;
+  --brand: #2F5FBF;
   --brand-soft: #eef3fd;
   /* pos/neg/neu 做徽章底色配白字，原值白字对比只有 2.5~3.3:1（1.4.3 不达标），
      加深后白字都在 4.5:1 以上；改的是色阶深浅，语义不变 */
@@ -20,8 +20,12 @@
   /* 次级底色：评论项、词条卡、平台凭据卡这类「卡中之卡」统一用它，
      无边框化之后，界面里的线条只剩面板和可选中卡片两种 */
   --soft: #f6f8fa;
-  /* 阴影调到刚好能托起面板，不制造悬浮感 */
-  --shadow: 0 1px 2px rgba(31, 35, 40, .04), 0 2px 10px rgba(31, 35, 40, .03);
+  /* 阴影降到刚好能托起面板，不制造悬浮感 —— 一屏六个面板，阴影一重就互相打架 */
+  --shadow: 0 1px 2px rgba(31, 35, 40, .05);
+  /* 左栏分组强调色：采集蓝 / 任务青绿 / 设置紫，与面板顶部色条对应 */
+  --c-collect: #2F5FBF;
+  --c-analyze: #0E8C7A;
+  --c-output: #6D4FC0;
 }
 
 * { box-sizing: border-box; }
@@ -42,8 +46,8 @@ body {
 }
 
 header {
-  background: var(--panel);
-  border-bottom: 1px solid var(--line);
+  background: var(--brand);
+  border-bottom: none;
   padding: 14px 24px;
   display: flex;
   align-items: center;
@@ -52,24 +56,41 @@ header {
   top: 0;
   z-index: 20;
 }
-header h1 { font-size: 18px; margin: 0; font-weight: 600; }
-header .sub { color: var(--text-3); font-size: 12px; }
+header h1 { font-size: 18px; margin: 0; font-weight: 700; color: #fff; letter-spacing: .3px; }
+header .sub { color: rgba(255,255,255,.82); font-size: 12px; }
 header .spacer { flex: 1; }
 
+/* 左栏 360 → 400px：360 是所有挤压问题的根源。
+   左栏 14 个 .row 里最严重的两处（三个 select 等分 103px、三个按钮等分 103px）
+   在 400px 下才有足够空间 —— 而右栏并没有因此少掉什么，它的可用内容宽
+   远大于左栏（分析设置的网格下限是 180px）。 */
 .layout {
   display: grid;
-  grid-template-columns: 360px 1fr;
+  grid-template-columns: 400px minmax(0, 1fr);
   gap: 16px;
-  padding: 16px 24px 40px;
+  padding: 16px 24px 36px;
   align-items: start;
 }
+/* 左栏页签：把 9 个面板按采集 / 任务 / 设置分组，一次只显示一组，
+   左栏纵向长度从 9 个面板降到约 3 个，不再被长列表拖着滚动 */
+.side-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+.side-tabs button { border: 1px solid var(--line); background: #fff; color: var(--text-2);
+  padding: 7px 16px; border-radius: 8px; cursor: pointer; font-family: inherit; font-size: 13px;
+  transition: .15s; }
+.side-tabs button:hover { border-color: var(--brand); color: var(--brand); }
+.side-tabs button.active { background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 600; }
+/* 左栏面板按分组上淡彩底 + 顶部色条：采集蓝 / 任务青绿 / 设置紫。
+   底色饱和度压到约 4%，只有色条是实色，整体仍克制不花哨 */
+.layout .panel[data-group="collect"] { background: #F7FAFE; border-top: 3px solid var(--c-collect); }
+.layout .panel[data-group="task"] { background: #F6FBF9; border-top: 3px solid var(--c-analyze); }
+.layout .panel[data-group="setting"] { background: #FAF8FE; border-top: 3px solid var(--c-output); }
 
 .panel {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 16px;
-  margin-bottom: 14px;
+  padding: 14px;
+  margin-bottom: 12px;
   box-shadow: var(--shadow);
 }
 .panel h2 {
@@ -80,9 +101,19 @@ header .spacer { flex: 1; }
   align-items: center;
   gap: 8px;
 }
-.panel h2 .tip { font-weight: normal; color: var(--text-3); font-size: 12px; }
+/* .tip 原来只匹配 h2，但 #result 里的区块标题是 h3（app.js 生成的模板），
+   匹配不到就会继承 h3 的黑字同粗 —— 本该灰字弱化的说明文字变得比正文还重。
+   这里把 h3 一并纳入，标题层级才有「主标题 + 灰色注解」的区分。 */
+.panel h2 .tip, .panel h3 .tip { font-weight: normal; color: var(--text-3); font-size: 12px; }
 
-label { display: block; font-size: 12px; color: var(--text-2); margin: 10px 0 4px; }
+/* 区块标题（#result 内由 app.js 生成的 h3）：把内联样式收进类里，
+   字号比 h2 小半格，字重降到 500，与面板标题形成一级差。
+   .blk-h.first 用于本来就紧贴上方内容的位置（情感分布里的正/负面原声），
+   避免凭空多出 16px 上边距。 */
+.blk-h { margin: 16px 0 8px; font-size: 13px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+.blk-h.first { margin-top: 0; }
+
+label { display: block; font-size: 12px; color: var(--text-2); margin: 8px 0 4px; }
 input[type=text], input[type=number], textarea, select {
   width: 100%;
   padding: 8px 10px;
@@ -95,12 +126,27 @@ input[type=text], input[type=number], textarea, select {
   outline: none;
 }
 input:focus, textarea:focus, select:focus { border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-soft); }
-textarea { resize: vertical; min-height: 110px; line-height: 1.5; }
+textarea { resize: vertical; min-height: 84px; line-height: 1.5; }
 /* 采集链接框只需 3 行，导入文本框保持较高 */
 #url { min-height: 64px; }
 
-.row { display: flex; gap: 8px; }
-.row > * { flex: 1; }
+/* .row 原来是 .row > *{flex:1} —— 所有子项无条件等分，
+   于是「三个 select 各 103px」「三个按钮各 103px」全都被挤压
+   （「TapTap（浏览器助手）」8 字加原生箭头需要约 130px）。
+   改成 grid：等分只作用于「看起来该等分」的同类控件，
+   按钮和短下拉用 auto 保持自身宽度，不再被拉长或压短。 */
+.row { display: flex; gap: 8px; align-items: flex-end; }
+.row > * { min-width: 0; }
+
+/* 只有输入类控件吃掉剩余宽度，按钮与短下拉保持自身尺寸 */
+.row > input[type=text], .row > input[type=number], .row > textarea, .row > select { flex: 1 1 0; width: auto; }
+.row > button { flex: 0 0 auto; white-space: nowrap; }
+/* 格式选择这类「短下拉」内容本身就短，不该抢宽度 */
+.row > select.auto { flex: 0 0 auto; width: auto; }
+
+/* 内联 max-width 的那几格（#limit 120px / #impFmt 等）在这里统一放开：
+   之前靠 max-width 硬压，配合 flex:1 会留出右侧空洞。 */
+.row > div { flex: 1 1 0; }
 
 button {
   border: 1px solid var(--line);
@@ -127,6 +173,37 @@ button.sm { padding: 4px 10px; font-size: 12px; }
 }
 .tabs button.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
 
+/* 平台下拉要 2fr：「TapTap（浏览器助手）」8 字加原生箭头需要约 130px，
+   与另两个「按热度」「20 条」等分（各约 90px）会把它截断。 */
+.row-plat > select:first-child { flex: 2 1 0; }
+/* 三个按钮按内容宽度分配，「关闭登录浏览器」7 字最宽，需要 ~120px，
+   等分（各约 117px）放不下会折行。 */
+.row-3btn { flex-wrap: wrap; }
+.row-3btn > button { flex: 1 1 auto; }
+
+/* 分析设置：7 个控件原来挤在一条 .row 里等分，视口 1440px 时每格 133px、
+   label 折2 行；降到 1101px 时每格仅 88px、label 折 3-4 行，
+   number input 只剩约 66px（还要放步进器）—— 基本不可用。
+   改网格后行数从 1 变 2，顺带省约 120px 纵向。
+
+   上限写3 列而不是纯 auto-fit：auto-fit 会随视口无上限增长，
+   1920px 下能塞 7 列、格子压到 193px，最长的那条label
+   「分析量级上限（0 = 不限制，超过则抽样）」反而会折成 2 行 ——
+   宽屏比窄屏更难看。锁死 3 列后宽屏格子变宽、label 恒为单行。 */
+.opt-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px 12px; }
+.opt-grid label { margin: 0 0 3px; }
+/* 复选框独占一行居左，不需要跟着前面的输入框对齐 */
+.opt-check { display: flex; align-items: flex-end; }
+.opt-grid label.check {
+  display: flex; gap: 6px; align-items: center; font-weight: 400;
+  color: var(--text); font-size: 13px; margin: 0; cursor: pointer;
+  padding-bottom: 7px;
+}
+/* 操作按钮行：按钮不再等分，「未选中任务」靠右且有最小宽度 */
+.row-acts { flex-wrap: wrap; }
+.row-acts > button { flex: 0 0 auto; }
+.row-acts > #curTask { flex: 0 0 auto; min-width: 120px; text-align: right; }
+
 .plat-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {
   font-size: 11px; padding: 3px 9px; border-radius: 20px;
@@ -137,7 +214,9 @@ button.sm { padding: 4px 10px; font-size: 12px; }
 .chip.restricted { background: #fdeaea; color: #a53834; }
 .chip.manual { background: #eceef1; color: #6b737b; }
 
-.task-list { max-height: 420px; overflow: auto; }
+/* 420 → 300：任务卡每张约 90px，420px 只露 4 张半，
+   缩到 300px 仍能看 3 张，够判断「有没有新的任务没分析」。 */
+.task-list { max-height: 300px; overflow: auto; }
 .task {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -160,10 +239,21 @@ button.sm { padding: 4px 10px; font-size: 12px; }
 .status.error { background: #fdeaea; color: #a53834; }
 .status.pending { background: #eceef1; color: #6b737b; }
 
-.kpis { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin-bottom: 14px; }
-.kpi { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 12px; text-align: center; }
+/* 原来固定 5 列，窄栏时每格被压得数字换行。改auto-fit 后格子不低于 120px，
+   装不下就自然降列 —— 与 JS 恒定输出 5 个 .kpi 不冲突。 */
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; margin-bottom: 14px; }
+/* KPI 按语义上色：总量蓝 / 好评绿 / 差评红 / 族群灰 / 类别琥珀。
+   顶部 3px 色条 + 数字同色，5 个指标一眼区分正负，不用读标签。 */
+.kpi { background: var(--panel); border: 1px solid var(--line); border-top: 3px solid var(--brand); border-radius: var(--radius); padding: 12px; text-align: center; }
 .kpi b { display: block; font-size: 20px; color: var(--brand); }
 .kpi span { font-size: 12px; color: var(--text-3); }
+.kpis .kpi:nth-child(1) { border-top-color: var(--brand); }
+.kpis .kpi:nth-child(2) { border-top-color: var(--pos); }
+.kpis .kpi:nth-child(2) b { color: var(--pos); }
+.kpis .kpi:nth-child(3) { border-top-color: var(--neg); }
+.kpis .kpi:nth-child(4) { border-top-color: var(--neu); }
+.kpis .kpi:nth-child(5) { border-top-color: #b07d12; }
+.kpis .kpi:nth-child(5) b { color: #b07d12; }
 
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; margin-bottom: 10px; }
 .card .ch { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; margin-bottom: 8px; }
@@ -218,6 +308,9 @@ button.sm { padding: 4px 10px; font-size: 12px; }
 .kw { border: 1px solid transparent; border-radius: 8px; padding: 8px 10px; display: flex; justify-content: space-between; align-items: baseline; background: var(--soft); }
 .kw b { font-size: 14px; }
 .kw span { font-size: 12px; color: var(--text-3); }
+/* 只有带 data-w 的词条卡可点（JS 只给这类绑 onClick），
+   不可点的那两组不显示手型光标，避免误导成「能点但点了没反应」。 */
+.kw:not([data-w]) { cursor: default; }
 
 /* 已人工标注过的语句：描边区分，一眼看出哪些是「你改过的」 */
 .sent-chip.memorized { box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .65); }
@@ -291,6 +384,12 @@ td.txt { max-width: 520px; }
   .kpis { grid-template-columns: repeat(3, 1fr); }
 }
 
+/* 右栏也跟着变窄，3 列会让格子小到 label 又折行，降成 2 列。
+   放在 1100px 之后：单列布局下右栏就是满宽，2 列格子有足够空间。 */
+@media (max-width: 1100px) {
+  .opt-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
 /* 关键词发现结果列表 */
 .disc-list { max-height: 260px; overflow: auto; margin-top: 6px; }
 .disc-item {
@@ -301,3 +400,51 @@ td.txt { max-width: 520px; }
 .disc-item input { margin-top: 3px; }
 .disc-item .di-main { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.4; }
 .disc-item .di-main b { font-weight: 600; }
+
+/* 监测清单 */
+.watch-list { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.watch-item {
+  border: 1px solid var(--line); border-radius: var(--radius);
+  padding: 10px 12px; background: var(--soft);
+}
+.watch-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.watch-head b { font-size: 14px; font-weight: 600; }
+.watch-url {
+  font-size: 12px; color: var(--text-3); margin: 4px 0 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.watch-meta { font-size: 12px; color: var(--text-2); margin-bottom: 8px; }
+.watch-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.watch-actions .sm { padding: 3px 10px; font-size: 12px; }
+.watch-actions .sm.danger { border-color: #c0392b; color: #c0392b; }
+.watch-actions .sm.danger:hover { background: #fdeaea; }
+.watch-hist { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+.watch-hist-table { display: flex; flex-direction: column; gap: 2px; margin-top: 6px; font-size: 12px; }
+.watch-hist-table div {
+  display: grid; grid-template-columns: 1fr auto auto auto; gap: 10px;
+  align-items: center; padding: 2px 0; border-bottom: 1px solid var(--line-soft);
+}
+.watch-hist-table .neg { color: var(--neg); font-weight: 600; }
+.watch-hist-table .pos { color: var(--pos); font-weight: 600; }
+
+/* 版本对比 */
+.cmp-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+.cmp-col { border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 10px; background: var(--soft); font-size: 13px; }
+.cmp-col b { font-size: 13px; }
+.cmp-delta { margin-top: 8px; padding: 6px 10px; border-radius: var(--radius); font-weight: 600; font-size: 13px; }
+.cmp-delta.neg { background: #fdeaea; color: var(--neg); }
+.cmp-delta.pos { background: #eaf4ec; color: var(--pos); }
+.cmp-topics { margin-top: 8px; font-size: 13px; }
+.cmp-topics > b { display: block; margin-bottom: 4px; }
+.cmp-topics > div { display: grid; grid-template-columns: 1fr auto; gap: 10px; padding: 2px 0; border-bottom: 1px solid var(--line-soft); }
+.cmp-topics .neg { color: var(--neg); font-weight: 600; }
+.cmp-topics .pos { color: var(--pos); font-weight: 600; }
+
+/* 评论逐条：分页 + 已记住置顶 */
+.cm-toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 10px; flex-wrap: wrap; }
+.cm-toolbar select { padding: 3px 6px; border-radius: var(--radius); border: 1px solid var(--line); background: var(--bg); color: var(--text); }
+.cm-wrap { max-height: 62vh; overflow: auto; border: 1px solid var(--line-soft); border-radius: var(--radius); padding: 4px 6px; }
+.cm-list { display: flex; flex-direction: column; gap: 4px; }
+.cm-item { display: flex; align-items: flex-start; gap: 8px; padding: 5px 4px; border-bottom: 1px solid var(--line-soft); }
+.cm-item .cm-text { flex: 1; line-height: 1.5; word-break: break-word; }
+#cmMore { margin-top: 10px; }

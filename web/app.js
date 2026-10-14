@@ -1,6 +1,6 @@
 /* CommunityPulse 前端逻辑 */
 const $ = (s) => document.querySelector(s);
-const state = { taskId: null, result: null, tab: 'kw', charts: {} };
+const state = { taskId: null, result: null, tab: 'kw', charts: {}, cm: { offset: 0, sort: 'like', items: [], has_more: false, loading: false } };
 
 function toast(msg) {
   const t = $('#toast');
@@ -83,6 +83,8 @@ async function init() {
     `<span class="chip ${i.reliability}" title="${esc(i.hint)}">${esc(i.label)} · ${rel[i.reliability]}</span>`).join('');
   loadTasks();
   setInterval(loadTasks, 2500);
+  loadWatchlist();
+  setInterval(loadWatchlist, 30000);
 }
 
 async function loadTasks() {
@@ -104,10 +106,16 @@ async function loadTasks() {
         <button class="sm" data-act="del" data-id="${t.id}">删除</button>
       </div>
     </div>`).join('');
+  state.tasks = r.items || [];
+  fillCompareSelects();
   box.querySelectorAll('.task').forEach((el) => {
     el.onclick = (e) => {
-      const act = e.target.dataset.act;
-      const id = +e.target.dataset.id || +el.dataset.id;
+      // closest 而不是 e.target.dataset：按钮文字一旦被包进<span>，
+      // e.target 就变成 span，dataset.act 为 undefined，三个分支全部落空，
+      // 删除/重采/分析会静默退化成「选中任务」—— 不报错、只是点了没反应。
+      const btn = e.target.closest('[data-act]');
+      const act = btn ? btn.dataset.act : undefined;
+      const id = +((btn && btn.dataset.id)) || +el.dataset.id;
       if (act === 'del') { delTask(id); return; }
       if (act === 'recollect') { recollectTask(id); return; }
       if (act === 'analyze') { state.taskId = id; runAnalyze(id); return; }
@@ -513,46 +521,205 @@ $('#btnAnalyze').onclick = () => {
   runAnalyze(state.taskId);
 };
 
-async function runAnalyze(id) {
+async function runAnalyze(id, opts = {}) {
   const alertPct = +$('#negRate').value;
   const payload = {
     cluster_threshold: +$('#threshold').value || 0.45,
     top_n: +$('#topN').value || 60,
     extra_stopwords: $('#stopwords').value.trim(),
     top_liked_n: +$('#topLiked').value || 0,
+    analyze_max: +$('#analyzeMax').value || 0,
     // 后端按 0.05~0.9 夹取，这里只管把百分比换算成小数
     ...(alertPct > 0 ? { neg_alert_rate: alertPct / 100 } : {}),
   };
-  toast('分析中…');
+  if (opts.force) payload.force = true;
+  if ($('#useLlm').checked) {
+    payload.use_llm = true;
+    if (!state.llmConfigured) toast('未配置 LLM 接口，本次将使用规则结果');
+  }
+  const btn = $('#btnAnalyze');
+  btn.disabled = true; btn.textContent = '排队中…';
   let r = await api(`/api/analyze/${id}`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
   // 采集还在进行：不静默按当前数据出结果，先说清楚代价再让用户决定
-  if (!r.ok && r.code === 'collecting') {
+  if (!r.ok && r.code === 'collecting' && !opts.force) {
     const tgt = r.target ? ` / 目标 ${r.target} 条` : '';
     const go = await appConfirm(
       `任务 #${id} 还在采集中`,
       `已入库 ${r.collected} 条${tgt}。现在分析只会覆盖这部分数据，采完后需要重新分析才能得到全量结果。仍要分析当前数据吗？`,
       '仍要分析');
-    if (!go) { loadTasks(); return; }
-    r = await api(`/api/analyze/${id}`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...payload, force: true }),
-    });
+    if (!go) { btn.disabled = false; btn.textContent = '分析选中任务'; loadTasks(); return; }
+    return runAnalyze(id, { force: true });
   }
-  if (!r.ok) return toast(r.error || '分析失败');
-  state.result = r.result;
-  state.taskId = id;
-  state.tab = 'kw';
-  render();
-  const s = r.result.stats || {};
-  if (s.task_total && s.raw_total && s.raw_total < s.task_total) {
-    toast(`分析完成：本次分析 ${s.raw_total} 条 / 任务共 ${s.task_total} 条（有效 ${s.total} 条）`);
-  } else {
-    toast('分析完成');
+  if (!r.ok || !r.job_id) {
+    btn.disabled = false; btn.textContent = '分析选中任务';
+    return toast(r.error || r.message || '分析启动失败');
+  }
+  // 分析改为后台任务：轮询进度，按钮实时显示阶段与百分比，不卡白屏
+  const timer = setInterval(async () => {
+    const j = await api('/api/analyze/job/' + r.job_id);
+    if (!j.ok) {
+      clearInterval(timer); btn.disabled = false; btn.textContent = '分析选中任务';
+      return toast(j.error || '查询分析进度失败');
+    }
+    if (j.status === 'pending' || j.status === 'running') {
+      const p = j.progress || {};
+      const pct = Math.round((p.fraction || 0) * 100);
+      btn.textContent = (p.stage || '分析中') + (pct ? ` ${pct}%` : '…');
+      return;
+    }
+    clearInterval(timer); btn.disabled = false; btn.textContent = '分析选中任务';
+    if (j.status === 'error') {
+      return toast('分析失败：' + (j.error || '未知错误'));
+    }
+    const res = j.result || {};
+    state.result = res;
+    state.taskId = id;
+    state.tab = 'kw';
+    render();
+    const s = res.stats || {};
+    if (s.task_total && s.raw_total && s.raw_total < s.task_total) {
+      toast(`分析完成：本次分析 ${s.raw_total} 条 / 任务共 ${s.task_total} 条（有效 ${s.total} 条）`);
+    } else if (s.sampled) {
+      toast(`分析完成：抽样分析 ${s.total} 条 / 去重后 ${s.pool_size} 条`);
+    } else {
+      toast('分析完成');
+    }
+  }, 1500);
+}
+
+/* ---------- 监测清单 ---------- */
+function watchRowHtml(w) {
+  const en = w.enabled ? '启用' : '已暂停';
+  const latest = w.latest || {};
+  const negPct = latest.negative_rate != null ? (latest.negative_rate * 100).toFixed(1) + '%' : '—';
+  const posPct = latest.positive_rate != null ? (latest.positive_rate * 100).toFixed(1) + '%' : '—';
+  const runTxt = w.running ? '采集中…' : '立即采集';
+  return `<div class="watch-item" data-id="${w.id}">
+    <div class="watch-head">
+      <b>${esc(w.name || '')}</b>
+      <span class="chip ${w.enabled ? 'stable' : 'manual'}">${en}</span>
+    </div>
+    <div class="watch-url" title="${esc(w.url || '')}">${esc(w.url || '')}</div>
+    <div class="watch-meta">间隔 ${w.interval_hours}h · 最新 负 ${negPct} / 正 ${posPct} · 快照 ${w.snapshots} 次${w.running ? ' · <b style="color:#e0a800">进行中</b>' : ''}</div>
+    <div class="watch-actions">
+      <button class="sm" data-act="wrun" data-id="${w.id}">${runTxt}</button>
+      <button class="sm" data-act="wtoggle" data-id="${w.id}">${w.enabled ? '暂停' : '启用'}</button>
+      <button class="sm" data-act="whist" data-id="${w.id}">历史</button>
+      <button class="sm danger" data-act="wremove" data-id="${w.id}">删除</button>
+    </div>
+    <div class="watch-hist" id="whist-${w.id}" style="display:none"></div>
+  </div>`;
+}
+
+function sparkline(pts) {
+  const w = 240, h = 40;
+  const step = pts.length > 1 ? w / (pts.length - 1) : 0;
+  const coords = pts.map((p, i) => `${(i * step).toFixed(1)},${(h - (p.v || 0) * h).toFixed(1)}`).join(' ');
+  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="background:#0f1320;border-radius:6px;margin-top:6px">
+    <polyline points="${coords}" fill="none" stroke="#d9534f" stroke-width="1.5"/></svg>`;
+}
+
+async function loadWatchlist() {
+  const r = await api('/api/watchlist');
+  const box = $('#watchList');
+  if (!r.ok || !r.items || !r.items.length) {
+    box.innerHTML = '<span class="mut">暂无监测项</span>';
+    return;
+  }
+  box.innerHTML = r.items.map(watchRowHtml).join('');
+}
+
+async function showWatchHistory(wid) {
+  const el = $('#whist-' + wid);
+  if (!el) return;
+  if (el.style.display !== 'none') { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.style.display = 'block';
+  el.innerHTML = '<span class="mut">加载中…</span>';
+  const r = await api('/api/watchlist/' + wid + '/history');
+  if (!r.ok) { el.innerHTML = '<span class="mut">历史加载失败</span>'; return; }
+  const items = r.items || [];
+  if (!items.length) { el.innerHTML = '<span class="mut">还没有任何快照</span>'; return; }
+  const pts = items.map((s) => ({ v: s.negative_rate || 0 }));
+  el.innerHTML = sparkline(pts) +
+    '<div class="watch-hist-table">' + items.slice(-12).map((s) => `
+      <div><span>${new Date((s.created_at || 0) * 1000).toLocaleString()}</span>
+      <span class="neg">负 ${((s.negative_rate || 0) * 100) | 0}%</span>
+      <span class="pos">正 ${((s.positive_rate || 0) * 100) | 0}%</span>
+      <span>${s.comment_count || 0} 条</span></div>`).join('') + '</div>';
+}
+
+$('#btnAddWatch').onclick = async () => {
+  const name = $('#watchName').value.trim();
+  const url = $('#watchUrl').value.trim();
+  if (!name || !url) return toast('请填写名称和链接');
+  const r = await api('/api/watchlist', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, url, interval_hours: (+$('#watchInterval').value || 24) }),
+  });
+  if (!r.ok) return toast(r.error || '添加失败');
+  $('#watchName').value = ''; $('#watchUrl').value = '';
+  toast('已添加，正在采集第一次数据…');
+  loadWatchlist();
+};
+
+$('#watchList').onclick = async (e) => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act, id = +btn.dataset.id;
+  if (act === 'wremove') {
+    const r = await api('/api/watchlist/' + id + '/remove', { method: 'POST' });
+    if (r.ok) loadWatchlist();
+  } else if (act === 'wtoggle') {
+    const r = await api('/api/watchlist/' + id + '/toggle', { method: 'POST' });
+    if (r.ok) loadWatchlist();
+  } else if (act === 'wrun') {
+    const r = await api('/api/watchlist/' + id + '/run', { method: 'POST' });
+    if (!r.ok) return toast(r.error || '启动失败');
+    toast('已触发采集'); loadWatchlist();
+  } else if (act === 'whist') {
+    await showWatchHistory(id);
+  }
+};
+
+/* ---------- 版本对比 ---------- */
+function fillCompareSelects() {
+  const tasks = state.tasks || [];
+  for (const sel of [document.getElementById('cmpA'), document.getElementById('cmpB')]) {
+    if (!sel) continue;
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">选择任务…</option>' +
+      tasks.map((t) => `<option value="${t.id}">${esc(t.name || t.source_url || ('#' + t.id))} (${t.total || 0})</option>`).join('');
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
   }
 }
+
+async function runCompare() {
+  const a = $('#cmpA').value, b = $('#cmpB').value;
+  if (!a || !b) return toast('请先选择两个任务');
+  const r = await api('/api/compare?a=' + a + '&b=' + b);
+  if (!r.ok) return toast(r.error || '对比失败');
+  const { a: ra, b: rb, delta } = r;
+  const pct = (x) => (x * 100).toFixed(1) + '%';
+  const dNeg = delta.rates.negative_rate * 100;
+  const trend = dNeg > 0.05 ? `负面率上升 ${dNeg.toFixed(1)}pp（恶化）`
+    : (dNeg < -0.05 ? `负面率下降 ${(-dNeg).toFixed(1)}pp（好转）` : '负面率基本持平');
+  const movers = Object.entries(delta.topics)
+    .sort((x, y) => Math.abs(y[1]) - Math.abs(x[1])).slice(0, 8)
+    .map(([k, v]) => `<div><span>${esc(k)}</span><span class="${v > 0 ? 'pos' : 'neg'}">${v > 0 ? '+' : ''}${v}</span></div>`).join('');
+  $('#compareResult').innerHTML = `
+    <div class="cmp-grid">
+      <div class="cmp-col"><b>${esc(ra.name)}</b><div class="mut">${ra.total} 条</div>
+        <div>正 ${pct(ra.positive_rate)} · 中 ${pct(ra.neutral_rate)} · 负 ${pct(ra.negative_rate)}</div></div>
+      <div class="cmp-col"><b>${esc(rb.name)}</b><div class="mut">${rb.total} 条</div>
+        <div>正 ${pct(rb.positive_rate)} · 中 ${pct(rb.neutral_rate)} · 负 ${pct(rb.negative_rate)}</div></div>
+    </div>
+    <div class="cmp-delta ${dNeg > 0.05 ? 'neg' : (dNeg < -0.05 ? 'pos' : '')}">${trend}</div>
+    <div class="cmp-topics"><b>吐槽点变化（B − A 条数）</b>${movers || '<span class="mut">无差异</span>'}</div>`;
+}
+$('#btnCompare').onclick = runCompare;
 
 /* 负面预警条：先把结论摆出来，下面的 KPI 和图表再解释为什么 */
 const ALERT_LBL = { high: '需处理', medium: '留意', low: '可控' };
@@ -570,7 +737,29 @@ function alertHtml(d) {
 }
 
 /* ---------- 渲染 ---------- */
+/* ECharts 实例回收：render() 每次都会整体重写 #result 的 innerHTML，
+   旧实例的 canvas 与事件监听会随脱离文档的 DOM 一起被丢掉，但实例本身
+   没有 dispose —— 每切一次 tab 就漏一个，resize 也通知不到它们。
+   这里集中登记，每次重画前统一 dispose。 */
+const _charts = [];
+function _disposeCharts() {
+  while (_charts.length) {
+    const c = _charts.pop();
+    try { c.dispose(); } catch (e) { /* 已脱离文档的实例 dispose 可能抛错，忽略 */ }
+  }
+}
+/* 图表容器宽度会随窗口变化（尤其是改了 .layout 的列宽之后），
+   没有 resize 的实例画布尺寸会一直停在初始化时的那一版。 */
+let _resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_resizeTimer);
+  _resizeTimer = setTimeout(() => {
+    _charts.forEach((c) => { try { c.resize(); } catch (e) { /* 同上 */ } });
+  }, 160);
+});
+
 function render() {
+  _disposeCharts();
   const d = state.result;
   if (!d || !d.stats || !d.stats.total) {
     $('#result').innerHTML = '<div class="empty">' + esc((d && d.error) || '暂无分析结果') + '</div>';
@@ -580,6 +769,7 @@ function render() {
   // 用 raw_total（本次实际读取条数）与任务库中总数比较：total 是去重后的，拿它比会误判
   const cut = s.task_total && s.raw_total && s.raw_total < s.task_total;
   const useTop = s.top_liked_n && s.pool_size && s.top_liked_n < s.pool_size;
+  const sampled = s.sampled && s.analyze_max && s.pool_size && s.total < s.pool_size;
   const kpi = `
     <div class="kpis">
       <div class="kpi"><b>${s.total}</b><span>${cut ? '本次有效评论' : '有效评论'}</span></div>
@@ -596,7 +786,9 @@ function render() {
     : (useTop
       ? `<div class="warn-box">当前只分析<b>热度前 ${s.top_liked_n} 条</b>（共 ${s.pool_size} 条）。
          想看全量，把「仅分析热度前 N 条」改成 0 重新分析。</div>`
-      : (s.pool_size ? `<div class="mut" style="margin-bottom:10px">分析范围：全部 ${s.pool_size} 条</div>` : ''));
+      : (sampled
+        ? `<div class="warn-box">本次抽样分析 <b>${s.total} 条</b> / 去重后共 <b>${s.pool_size} 条</b>（量级上限 ${s.analyze_max}，保留高赞 + 覆盖长尾）。把「分析量级上限」改成 0 可看全量。</div>`
+        : (s.pool_size ? `<div class="mut" style="margin-bottom:10px">分析范围：全部 ${s.pool_size} 条</div>` : '')));
   const noteHtml = (d.notes || []).length
     ? `<div class="warn-box">${(d.notes || []).map(esc).join('<br>')}</div>` : '';
   const tabs = [
@@ -692,6 +884,9 @@ async function _cycleStmt(key, el) {
     el.classList.add('memorized');
     el.title = `已记住这条评论为「${LBL[next]}」，重新分析后统计会更新`;
     toast('已记住这条评论的情感标签，重新分析后统计随之更新');
+    // 同步本地数据：下次渲染（加载更多/切排序）时这条会置顶
+    const it = (state.cm.items || []).find((x) => x.key === key);
+    if (it) it.mem_label = next;
   } catch (e) {
     toast('记忆保存失败：' + (e && e.message ? e.message : e));
   }
@@ -714,17 +909,18 @@ function tabKeywords(body, d) {
   const top = (d.keywords || []).slice(0, 40);
   body.innerHTML = `
     <div id="kwChart" class="chart" role="img" aria-label="高频词条柱状图，横条越长表示出现次数越多"></div>
-    <h3 style="margin:16px 0 8px;font-size:14px">词条明细 <span class="tip">点击词条看原句；点击右侧标签可改情感并记忆</span></h3>
+    <h3 class="blk-h">词条明细 <span class="tip">点击词条看原句；点击右侧标签可改情感并记忆</span></h3>
     <div class="kw-grid">${top.map((k) =>
       `<div class="kw" data-w="${esc(k.word)}"><b>${esc(k.word)}</b>${_sentChipHtml(k)}<span>${k.docs} 条</span></div>`).join('')}</div>
-    ${d.new_words && d.new_words.length ? `<h3 style="margin:18px 0 8px;font-size:14px">疑似新词 / 黑话 <span class="tip">按凝固度识别</span></h3>
+    ${d.new_words && d.new_words.length ? `<h3 class="blk-h">疑似新词 / 黑话 <span class="tip">按凝固度识别</span></h3>
       <div class="kw-grid">${d.new_words.slice(0, 24).map((n) =>
         `<div class="kw"><b>${esc(n.word)}</b><span>${n.count} 次</span></div>`).join('')}</div>` : ''}
-    ${d.phrases && d.phrases.length ? `<h3 style="margin:18px 0 8px;font-size:14px">高频短语</h3>
+    ${d.phrases && d.phrases.length ? `<h3 class="blk-h">高频短语</h3>
       <div class="kw-grid">${d.phrases.slice(0, 24).map((p) =>
         `<div class="kw"><b>${esc(p.phrase)}</b><span>${p.count} 次</span></div>`).join('')}</div>` : ''}
     <div id="kwEx" style="margin-top:14px"></div>`;
   const chart = echarts.init(document.getElementById('kwChart'));
+  _charts.push(chart);
   const data = top.slice(0, 20);
   chart.setOption({
     grid: { left: 90, right: 50, top: 10, bottom: 20 },
@@ -739,30 +935,37 @@ function tabKeywords(body, d) {
     }],
   });
   state.charts.kw = chart;
-  body.querySelectorAll('.kw').forEach((el) => {
-    el.style.cursor = 'pointer';
-    // 词条卡可点开原句：键盘也要能进（2.1.1）。卡内的情感标签是
-    // 独立按钮，Tab 会停在它上面，回车走它自己的切换逻辑
-    el.setAttribute('role', 'button');
-    el.tabIndex = 0;
-    el.setAttribute('aria-label', '查看包含「' + el.dataset.w + '」的原句');
-    el.onkeydown = (ev) => {
-      if (ev.target !== el) return;   // 焦点在卡内标签上时不抢
-      if (ev.key === 'Enter' || ev.key === ' ') {
-        ev.preventDefault();
+// 只有带data-w 的「词条明细」卡可点开原句。
+    // 「疑似新词」「高频短语」两组同样用 .kw 类但没有 data-w，
+    // 之前被这里无差别绑定，点击后 showKeywordExamples(undefined, d)
+    // 找不到任何原句，只会显示「已分析样本中没有完整原句」—— 看着像故障。
+    body.querySelectorAll('.kw[data-w]').forEach((el) => {
+      el.style.cursor = 'pointer';
+      // 词条卡可点开原句：键盘也要能进（2.1.1）。卡内的情感标签是
+      // 独立按钮，Tab 会停在它上面，回车走它自己的切换逻辑
+      el.setAttribute('role', 'button');
+      el.tabIndex = 0;
+      el.setAttribute('aria-label', '查看包含「' + el.dataset.w + '」的原句');
+      el.onkeydown = (ev) => {
+        if (ev.target !== el) return;   // 焦点在卡内标签上时不抢
+        if (ev.key === 'Enter' || ev.key === ' ') {
+          ev.preventDefault();
+          showKeywordExamples(el.dataset.w, d);
+        }
+      };
+      el.onclick = (ev) => {
+        // closest 而非 ev.target.classList：给标签包一层容器后，
+        // ev.target 会变成内层元素，判断就失效了
+        const chip = ev.target.closest('.sent-chip');
+        if (chip) {
+          ev.stopPropagation();
+          _cycleSentiment(el.dataset.w, chip);
+          return;
+        }
         showKeywordExamples(el.dataset.w, d);
-      }
-    };
-    el.onclick = (ev) => {
-      if (ev.target.classList.contains('sent-chip')) {
-        ev.stopPropagation();
-        _cycleSentiment(el.dataset.w, ev.target);
-        return;
-      }
-      showKeywordExamples(el.dataset.w, d);
-    };
-  });
-}
+      };
+    });
+  }
 
 function showKeywordExamples(word, d) {
   const hits = [];
@@ -811,6 +1014,7 @@ function tabTopics(body, d) {
       ${t.samples.slice(0, 3).map((s) => `<div class="sub">${_stmtChipHtml(s)} ${esc(s.content)} <span class="mut">👍${s.like_count}</span></div>`).join('')}
     </div>`).join('')}`;
   const chart = echarts.init(document.getElementById('tpChart'));
+  _charts.push(chart);
   chart.setOption({
     grid: { left: 110, right: 60, top: 10, bottom: 20 },
     tooltip: { trigger: 'axis' },
@@ -835,17 +1039,18 @@ function tabSentiment(body, d) {
     <div id="stChart" class="chart sm" role="img" aria-label="情感分布图表"></div>
     <div class="row" style="gap:14px;align-items:flex-start;margin-top:10px">
       <div style="flex:1">
-        <h3 style="font-size:14px;margin:0 0 8px">最负面原声 <span class="tip">点左侧标签可改情感并记住这条评论</span></h3>
+        <h3 class="blk-h first">最负面原声 <span class="tip">点左侧标签可改情感并记住这条评论</span></h3>
         ${(d.sentiment_examples.negative || []).slice(0, 8).map((x) =>
           `<div class="sub" style="margin-bottom:8px">${_stmtChipHtml(x)} ${esc(x.content)} <span class="mut">得分 ${x.score} · 👍${x.like_count}</span></div>`).join('')}
       </div>
       <div style="flex:1">
-        <h3 style="font-size:14px;margin:0 0 8px">最正面原声 <span class="tip">点左侧标签可改情感并记住这条评论</span></h3>
+        <h3 class="blk-h first">最正面原声 <span class="tip">点左侧标签可改情感并记住这条评论</span></h3>
         ${(d.sentiment_examples.positive || []).slice(0, 8).map((x) =>
           `<div class="sub" style="margin-bottom:8px">${_stmtChipHtml(x)} ${esc(x.content)} <span class="mut">得分 ${x.score} · 👍${x.like_count}</span></div>`).join('')}
       </div>
     </div>`;
   const chart = echarts.init(document.getElementById('stChart'));
+  _charts.push(chart);
   chart.setOption({
     tooltip: { trigger: 'item' },
     legend: { bottom: 0, textStyle: { color: '#5b636b' } },
@@ -871,6 +1076,7 @@ function tabTrend(body, d) {
   }
   body.innerHTML = '<div id="trChart" class="chart" role="img" aria-label="声量趋势图，横轴为时间，纵轴为评论数"></div>';
   const chart = echarts.init(document.getElementById('trChart'));
+  _charts.push(chart);
   chart.setOption({
     tooltip: { trigger: 'axis' },
     legend: { bottom: 0, textStyle: { color: '#5b636b' } },
@@ -904,33 +1110,88 @@ function tabHighlights(body, d) {
     </div>`).join('') : '<div class="empty">暂无</div>';
 }
 
-/* ---------- 评论逐条（逐条改标签并记忆） ---------- */
+/* ---------- 评论逐条（逐条改标签并记忆，支持分页） ---------- */
+async function loadComments(reset) {
+  const tid = state.taskId;
+  if (!tid || !state.cm.body) return;
+  if (reset) {
+    const b = state.cm.body;
+    // 切换排序 / 切换任务：清空分页，从第一页重新拉
+    state.cm = { tid, offset: 0, sort: state.cm.sort || 'like',
+                 items: [], has_more: false, loading: false, body: b };
+  }
+  if (state.cm.loading) return;
+  state.cm.loading = true;
+  const cm = state.cm;
+  try {
+    const r = await api(`/api/comments/${tid}?limit=300&offset=${cm.offset}&sort=${cm.sort}`);
+    if (!r.ok) { toast(r.error || '加载失败'); return; }
+    cm.items = reset ? (r.items || []) : cm.items.concat(r.items || []);
+    cm.offset = (r.offset || 0) + (r.items ? r.items.length : 0);
+    cm.has_more = !!r.has_more;
+    cm.total = r.total;
+  } catch (e) {
+    toast('加载失败：' + (e && e.message ? e.message : e));
+  } finally {
+    state.cm.loading = false;
+    renderCm();
+  }
+}
+
+function renderCm() {
+  const cm = state.cm;
+  const body = cm.body;
+  if (!body) return;
+  const wrap = body.querySelector('.cm-wrap');
+  const prevTop = wrap ? wrap.scrollTop : 0;
+  // 已记住的评论始终置顶，方便回看自己标过的内容；其余保持当前排序
+  const marked = cm.items.filter((x) => x.mem_label);
+  const rest = cm.items.filter((x) => !x.mem_label);
+  const ordered = marked.concat(rest);
+  const total = cm.total != null ? cm.total : cm.items.length;
+  const moreTxt = cm.has_more
+    ? `加载更多（已显示 ${cm.items.length} / 共 ${total} 条）`
+    : (cm.items.length < total ? '已显示全部' : '没有更多了');
+  body.innerHTML = `
+    <div class="cm-toolbar">
+      <label>排序
+        <select id="cmSort">
+          <option value="like"${cm.sort === 'like' ? ' selected' : ''}>按点赞</option>
+          <option value="recent"${cm.sort === 'recent' ? ' selected' : ''}>最新</option>
+          <option value="early"${cm.sort === 'early' ? ' selected' : ''}>最早</option>
+        </select>
+      </label>
+      <span class="mut">共 ${total} 条，已记住 ${marked.length} 条；点每条左侧标签可改情感并<b>记住这条评论</b>，改完后重新分析统计会更新</span>
+    </div>
+    <div class="cm-wrap">
+      <div class="cm-list">${ordered.length ? ordered.map((x) => `
+        <div class="cm-item">
+          ${_stmtChipHtml(x)}
+          <span class="cm-text">${esc(x.content)}</span>
+          <span class="mut">👍${x.like_count}${x.user_name ? ' · ' + esc(x.user_name) : ''}</span>
+        </div>`).join('') : '<div class="mut">暂无评论</div>'}</div>
+    </div>
+    ${cm.has_more
+      ? `<button id="cmMore" class="sm">${moreTxt}</button>`
+      : `<div class="mut" style="margin-top:8px">${moreTxt}</div>`}`;
+  _bindStmtChips(body);
+  const sel = document.getElementById('cmSort');
+  if (sel) sel.onchange = () => { state.cm.sort = sel.value; loadComments(true); };
+  const more = document.getElementById('cmMore');
+  if (more) more.onclick = () => loadComments(false);
+  const newWrap = body.querySelector('.cm-wrap');
+  if (newWrap) newWrap.scrollTop = prevTop;
+}
+
 async function tabComments(body, d) {
   const tid = state.taskId;
   if (!tid) { body.innerHTML = '<div class="empty">请先在左侧选中一个任务</div>'; return; }
-  body.innerHTML = '<div class="mut">正在加载评论…</div>';
-  let r;
-  try {
-    r = await api(`/api/comments/${tid}?limit=300`);
-  } catch (e) {
-    body.innerHTML = `<div class="err-box">加载失败：${esc(e && e.message ? e.message : e)}</div>`;
-    return;
+  state.cm.body = body;
+  if (state.cm.tid !== tid) {
+    await loadComments(true);
+  } else {
+    renderCm();
   }
-  if (!r.ok) { body.innerHTML = `<div class="err-box">${esc(r.error || '加载失败')}</div>`; return; }
-  const items = r.items || [];
-  const marked = items.filter((x) => x.mem_label).length;
-  body.innerHTML = `
-    <div class="mut" style="margin-bottom:10px;line-height:1.7">
-      共 ${r.total} 条，按点赞显示前 ${items.length} 条。点每条左侧标签可改情感并<b>记住这条评论</b>；
-      当前已记住 ${marked} 条。改完后重新分析，分布与统计会按你的标注更新。
-    </div>
-    <div class="cm-list">${items.map((x) => `
-      <div class="cm-item">
-        ${_stmtChipHtml(x)}
-        <span class="cm-text">${esc(x.content)}</span>
-        <span class="mut">👍${x.like_count}${x.user_name ? ' · ' + esc(x.user_name) : ''}</span>
-      </div>`).join('')}</div>`;
-  _bindStmtChips(body);
 }
 
 /* ---------- 导出 ---------- */
@@ -1054,6 +1315,11 @@ async function loadSettings() {
   const s = r.settings || {};
   $('#setSteamLang').value = s.steam_language || 'all';
   $('#setSteamDays').value = s.steam_day_range || 365;
+  $('#llmEndpoint').value = s.llm_endpoint || '';
+  $('#llmKey').value = s.llm_api_key || '';
+  $('#llmModel').value = s.llm_model || '';
+  $('#llmCap').value = s.llm_cap || 200;
+  state.llmConfigured = !!(s.llm_endpoint && s.llm_api_key);
 
   const c = await api('/api/credentials');
   state.creds = c.items || [];
@@ -1074,6 +1340,10 @@ $('#btnSaveSet').onclick = async () => {
       settings: {
         steam_language: $('#setSteamLang').value,
         steam_day_range: +$('#setSteamDays').value || 365,
+        llm_endpoint: $('#llmEndpoint').value.trim(),
+        llm_api_key: $('#llmKey').value.trim(),
+        llm_model: $('#llmModel').value.trim(),
+        llm_cap: +$('#llmCap').value || 200,
       },
     }),
   });
@@ -1089,7 +1359,9 @@ init();
   if (!ta) return;
   const grow = () => {
     ta.style.height = 'auto';
-    ta.style.height = Math.min(ta.scrollHeight, 360) + 'px';
+    // 上限 180px：原值 360px 让「一次填多个链接」把整个面板撑得很高，
+    // 而链接数量在下方 #urlCount 已经实时显示，不需要靠框高来体现。
+    ta.style.height = Math.min(ta.scrollHeight, 180) + 'px';
     updateUrlCount();
   };
   ta.addEventListener('input', grow);

@@ -17,7 +17,12 @@
 <main class="layout">
   <!-- 左栏 -->
   <div aria-label="采集与设置">
-    <div class="panel">
+    <div class="side-tabs" role="tablist">
+      <button data-tab="collect" class="active" type="button">采集</button>
+      <button data-tab="task" type="button">任务</button>
+      <button data-tab="setting" type="button">设置</button>
+    </div>
+    <div class="panel" data-group="collect">
       <h2>新建采集 <span class="tip">粘贴链接即可</span></h2>
       <label for="url">社区链接（每行一个，可一次填多个来源批量采集）</label>
       <textarea id="url" rows="5" placeholder="https://www.bilibili.com/video/BV...&#10;https://weibo.com/detail/xxxx"></textarea>
@@ -46,14 +51,14 @@
       <div id="previewBox"></div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-group="collect">
       <h2>关键词发现 <span class="tip">不知道盯哪些帖子时用</span></h2>
       <label for="kw">搜索关键词（如游戏名、版本名）</label>
       <div class="row">
         <input type="text" id="kw" placeholder="如：原神 卡顿">
         <button id="btnDiscover" class="ghost" style="max-width:96px">搜索</button>
       </div>
-      <div class="row" style="margin-top:8px">
+      <div class="row row-plat" style="margin-top:8px">
         <select id="kwPlatform" aria-label="选择平台">
           <option value="bilibili">B站（匿名可用）</option>
           <option value="weibo">微博（需登录）</option>
@@ -65,11 +70,11 @@
           <option value="reddit">Reddit（海外）</option>
           <option value="steam">Steam（搜索常不可达）</option>
         </select>
-        <select id="kwSort" aria-label="排序方式">
+        <select id="kwSort" class="auto" aria-label="排序方式">
           <option value="hot">按热度</option>
           <option value="new">按最新</option>
         </select>
-        <select id="kwLimit" aria-label="结果条数">
+        <select id="kwLimit" class="auto" aria-label="结果条数">
           <option value="10">10 条</option>
           <option value="20" selected>20 条</option>
           <option value="30">30 条</option>
@@ -97,7 +102,7 @@
       <div id="discoverBox" class="mut" style="margin-top:8px">输入关键词后点「搜索并采集」可一键抓取热度前 N 个来源的评论；或点「仅搜索」手动勾选。抖音/小红书走浏览器助手，会在已登录浏览器里搜索并逐条抓评论。</div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-group="collect">
       <h2>平台支持情况 <span class="tip">悬停查看说明</span></h2>
       <div class="plat-list" id="platList"><span class="mut">加载中…</span></div>
       <div class="mut" style="margin-top:8px">
@@ -108,7 +113,7 @@
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-group="collect">
       <h2>手动导入 <span class="tip">抖音 / 小红书 等走这里</span></h2>
       <label for="impText">粘贴评论（一行一条）或 CSV / JSON 内容</label>
       <textarea id="impText" placeholder="玩家A：这版本优化太差了&#10;玩家B：抽卡爆率一如既往的感人"></textarea>
@@ -130,12 +135,29 @@
       </div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-group="task">
       <h2>任务列表</h2>
       <div class="task-list" id="taskList"><span class="mut">暂无任务</span></div>
     </div>
 
-    <div class="panel">
+    <div class="panel" data-group="task">
+      <h2>监测清单 <span class="tip">定时重采同一链接，盯口碑走势</span></h2>
+      <label for="watchName">监测名称</label>
+      <input type="text" id="watchName" placeholder="如：2.3版本 官方公告帖">
+      <label for="watchUrl">社区链接（帖子 / 视频页，需服务端可直连的平台）</label>
+      <input type="text" id="watchUrl" placeholder="https://www.bilibili.com/video/BV...">
+      <div class="row" style="margin-top:8px">
+        <div style="max-width:170px">
+          <label for="watchInterval">重采间隔（小时）</label>
+          <input type="number" id="watchInterval" value="24" min="1" max="720">
+        </div>
+        <button id="btnAddWatch" class="primary" style="align-self:flex-end">添加并监测</button>
+      </div>
+      <div class="mut" style="margin-top:6px">服务启动后每 60s 检查一次到点的监测项，自动增量重采并分析，记录声量与正负向占比走势。抖音 / 小红书等浏览器助手类平台暂不支持自动重采。</div>
+      <div id="watchList" class="watch-list"><span class="mut">暂无监测项</span></div>
+    </div>
+
+    <div class="panel" data-group="setting">
       <h2>平台接入 <span class="tip">点登录 → 一键获取，就能抓完整评论区</span></h2>
       <div id="credList" class="cred-list"><span class="mut">加载中…</span></div>
       <div class="row">
@@ -152,7 +174,7 @@
           <input type="number" id="setSteamDays" value="365" min="1" max="3650">
         </div>
       </div>
-      <div class="row" style="margin-top:10px">
+      <div class="row row-3btn" style="margin-top:10px">
         <button id="btnSaveSet" class="primary">保存其他设置</button>
         <button id="btnReloadSet" class="ghost">刷新状态</button>
         <button id="btnCloseBrowser" class="ghost">关闭登录浏览器</button>
@@ -163,13 +185,50 @@
         不会保存你的密码。
       </div>
     </div>
+
+    <div class="panel" data-group="setting">
+      <h2>大模型情感增强 <span class="tip">可选 · 提升反讽/阴阳怪气识别</span></h2>
+      <label for="llmEndpoint">OpenAI 兼容接口地址</label>
+      <input type="text" id="llmEndpoint" placeholder="https://api.openai.com/v1">
+      <label for="llmKey">API Key</label>
+      <input type="password" id="llmKey" placeholder="sk-...">
+      <div class="row" style="margin-top:8px">
+        <div style="max-width:200px">
+          <label for="llmModel">模型名</label>
+          <input type="text" id="llmModel" placeholder="gpt-4o-mini">
+        </div>
+        <div style="max-width:160px">
+          <label for="llmCap">抽检上限（条）</label>
+          <input type="number" id="llmCap" value="200" min="10" max="2000" step="10">
+        </div>
+      </div>
+      <div class="mut" style="margin-top:6px">填好后在「分析设置」里勾选「启用 LLM 情感复核」即可。规则打底、LLM 复核高赞与易误判评论，接口不通时自动降级为规则结果。</div>
+    </div>
+
+    <div class="panel" data-group="setting">
+      <h2>版本对比 <span class="tip">两个任务并排看口碑变化</span></h2>
+      <div class="row">
+        <div style="flex:1">
+          <label for="cmpA">任务 A（基线）</label>
+          <select id="cmpA"><option value="">选择任务…</option></select>
+        </div>
+        <div style="flex:1">
+          <label for="cmpB">任务 B（对比）</label>
+          <select id="cmpB"><option value="">选择任务…</option></select>
+        </div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button id="btnCompare" class="primary">对比</button>
+      </div>
+      <div id="compareResult"></div>
+    </div>
   </div>
 
   <!-- 右栏 -->
   <div aria-label="分析结果">
     <div class="panel">
       <h2>分析设置</h2>
-      <div class="row">
+      <div class="opt-grid">
         <div>
           <label for="threshold">相似句判定阈值（越低越宽松）</label>
           <input type="number" id="threshold" value="0.45" step="0.05" min="0.3" max="0.8">
@@ -187,11 +246,20 @@
           <input type="number" id="topLiked" value="0" min="0" max="20000">
         </div>
         <div>
+          <label for="analyzeMax">分析量级上限（0 = 不限制，超过则抽样）</label>
+          <input type="number" id="analyzeMax" value="8000" min="0" max="200000" step="1000">
+        </div>
+        <div>
           <label for="negRate">负面预警线（%，分析后超线报警）</label>
           <input type="number" id="negRate" value="25" step="1" min="5" max="90">
         </div>
+        <div class="opt-check">
+          <label class="check">
+            <input type="checkbox" id="useLlm"> 启用 LLM 情感复核
+          </label>
+        </div>
       </div>
-      <div class="row" style="margin-top:12px; align-items:center">
+      <div class="row row-acts" style="margin-top:12px; align-items:center">
         <button id="btnAnalyze" class="primary">分析选中任务</button>
         <button id="btnXlsx">导出 Excel</button>
         <button id="btnCsv">导出 CSV</button>
@@ -209,6 +277,22 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/vendor/echarts.min.js"></script>
-<script src="/app.js"></script>
+  <script src="/app.js"></script>
+  <script>
+  /* 左栏页签分组：只切换面板显隐，不碰任何 id 与事件绑定。
+     元素始终在 DOM 里，app.js 的初始化与渲染照常工作。 */
+  (function () {
+    var tabs = document.querySelectorAll('.side-tabs [data-tab]');
+    var panels = document.querySelectorAll('.layout .panel[data-group]');
+    function show(g) {
+      panels.forEach(function (p) { p.hidden = (p.dataset.group !== g); });
+      tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === g); });
+    }
+    tabs.forEach(function (t) {
+      t.addEventListener('click', function () { show(t.dataset.tab); });
+    });
+    show('collect');
+  })();
+  </script>
 </body>
 </html>
