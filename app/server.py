@@ -577,6 +577,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 3 and parts[1] == "tasks":
                 db.delete_task(int(parts[2]))
                 self._json({"ok": True})
+            elif len(parts) == 3 and parts[1] == "watchlist":
+                db.remove_watch(int(parts[2]))
+                self._json({"ok": True})
             else:
                 self._json({"ok": False, "error": "不支持的操作"}, 400)
         except Exception as exc:  # noqa: BLE001
@@ -588,143 +591,628 @@ class Handler(BaseHTTPRequestHandler):
         self._send(204, b"", "text/plain")
 
     # -- API --
+    # -- 分发 --
+    # 路由表 + handler：以前是一条几百行的 elif 链，加一个接口就要在链中间插一段，
+    # 漏个括号 / 搞错顺序都会连带弄坏相邻分支。现在加接口 = 加一个方法 + 表里加一行，
+    # 顺序即优先级（和原来的 elif 链一致，前缀匹配必须排在精确匹配之后才不出错，
+    # 所以表里的排列顺序是刻意保留的，别随手「整理」）。
     def _api_get(self, path: str, qs: dict) -> None:
-        if path == "/api/health":
-            self._json({"ok": True, "jieba": HAS_JIEBA, "time": time.time()})
-        elif path.startswith("/api/browser-capture/"):
-            # 轮询浏览器采集任务进度：pending / running / done
-            job_id = path.rsplit("/", 1)[1]
-            job = _CAPTURE_JOBS.get(job_id)
-            if not job:
-                self._json({"ok": False, "error": "采集任务不存在或已过期"}, 404)
-                return
-            self._json({"ok": True, "status": job["status"],
-                        "result": job["result"], "error": job["error"]})
-        elif path.startswith("/api/browser-keyword-collect/"):
-            # 轮询浏览器关键词采集（搜索 + 逐条抓评论）进度
-            job_id = path.rsplit("/", 1)[1]
-            job = _CAPTURE_JOBS.get(job_id)
-            if not job:
-                self._json({"ok": False, "error": "任务不存在或已过期"}, 404)
-                return
-            self._json({"ok": True, "status": job["status"],
-                        "task_id": job.get("task_id"),
-                        "result": job["result"], "error": job["error"]})
-        elif path == "/api/platforms":
-            self._json({"ok": True, "items": [
-                {"platform": c.platform, "label": c.label, "reliability": c.reliability,
-                 "hint": c.hint}
-                for c in all_collectors() if c.platform != "generic"]})
-        elif path == "/api/credentials":
-            st = status_of(load_settings())
-            with _CAPTURE_LOCK:
-                for a in ACCESS:
-                    w = _CAPTURE_WATCHERS.get(a["key"])
-                    if w:
-                        if w.get("running") and not w.get("done"):
-                            st[a["key"]]["in_progress"] = True
-                        if w.get("done") and w.get("error"):
-                            st[a["key"]]["capture_error"] = w["error"]
-            self._json({"ok": True,
-                        "browser": bool(browser_cdp.browser_alive()),
-                        "items": [dict(a, **st[a["key"]]) for a in ACCESS]})
-        elif path == "/api/tasks":
-            self._json({"ok": True, "items": db.list_tasks()})
-        elif path.startswith("/api/tasks/"):
-            tid = int(path.rsplit("/", 1)[1])
-            t = db.get_task(tid)
-            if not t:
-                self._json({"ok": False, "error": "任务不存在"}, 404)
-                return
-            t["count"] = db.count_comments(tid)
-            self._json({"ok": True, "task": t})
-        elif path.startswith("/api/analysis/"):
-            tid = int(path.rsplit("/", 1)[1])
-            a = db.get_latest_analysis(tid)
-            self._json({"ok": True, "analysis": a})
-        elif path.startswith("/api/export/"):
-            tid = int(path.rsplit("/", 1)[1])
-            fmt = (qs.get("fmt") or ["xlsx"])[0]
-            t = db.get_task(tid)
-            if not t:
-                self._json({"ok": False, "error": "任务不存在"}, 404)
-                return
-            a = db.get_latest_analysis(tid)
-            if not a:
-                self._json({"ok": False, "error": "请先执行一次分析"}, 400)
-                return
-            comments = db.get_comments(tid)
-            if fmt == "xlsx":
-                p = to_excel(t["name"], a["result"], comments)
-            elif fmt == "csv":
-                p = to_csv(t["name"], a["result"], comments)
-            else:
-                p = to_html_report(t["name"], a["result"], comments)
-            # 文件名带中文，必须先在 href 里百分号编码：
-            # 浏览器通常会帮忙转码，但 fetch / download / 复制到地址栏都不会，
-            # 不编码就是 404。下载端已做 unquote，这里负责编码，两边对齐。
-            self._json({"ok": True, "path": str(p), "name": p.name,
-                        "url": f"/exports/{quote(p.name)}"})
-        elif path.startswith("/exports/"):
-            name = Path(path[len("/exports/"):]).name
-            f = EXPORT_DIR / name
-            if f.exists():
-                ctype = "text/html; charset=utf-8" if f.suffix == ".html" else (
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                    if f.suffix == ".xlsx" else "text/csv; charset=utf-8")
-                # 文件名带中文，必须按 RFC 5987 用 filename* 传（pure-ASCII），
-                # 再给老浏览器留一个 ASCII 兜底名，避免响应头里出现非 latin-1 字符。
-                ascii_name = name.encode("ascii", "ignore").decode() or f"report{f.suffix}"
-                self._send(200, f.read_bytes(), ctype, {
-                    "Content-Disposition":
-                        f'attachment; filename="{ascii_name}"; '
-                        f"filename*=UTF-8''{quote(name)}"})
-            else:
-                self._send(404, b"not found", "text/plain")
-        elif path == "/api/settings":
-            self._json({"ok": True, "settings": load_settings()})
-        elif path == "/api/sentiment-memory":
-            # 情感标签记忆：返回全部已记住的词条标签
-            self._json({"ok": True, "memory": sentiment_memory.load_memory()})
-        elif path == "/api/comment-memory":
-            # 语句级情感记忆：列出已人工标注过的评论
-            mem = comment_memory.load_memory()
-            items = [{"key": k, "label": (v or {}).get("label"),
-                      "text": (v or {}).get("text", ""), "at": (v or {}).get("at")}
-                     for k, v in mem.items()]
-            items.sort(key=lambda x: -(x.get("at") or 0))
-            self._json({"ok": True, "count": len(items), "items": items})
-        elif path.startswith("/api/comments/"):
-            # 评论逐条（带记忆覆盖后的情感标签），供前端逐条查看 / 改标签
-            tid = int(path.rsplit("/", 1)[1])
-            raw_limit = (qs.get("limit") or ["300"])[0]
-            try:
-                limit = max(1, min(int(raw_limit), 2000))
-            except (TypeError, ValueError):
-                limit = 300
-            rows = db.get_comments(tid, limit=limit)
-            overrides = sentiment_memory.overrides_to_lexicon(sentiment_memory.load_memory())
-            cmem = comment_memory.load_memory()
-            items = []
-            for r in rows:
-                txt = r.get("content") or ""
-                k = comment_memory.norm_key(txt)
-                ml = comment_memory.label_of(cmem, k)
-                label, score, _hits = score_text(txt, overrides)
-                if ml:
-                    label = ml
-                items.append({
-                    "id": r.get("id"), "content": txt[:300],
-                    "user_name": r.get("user_name") or "",
-                    "like_count": int(r.get("like_count") or 0),
-                    "published_at": r.get("published_at"),
-                    "key": k, "mem_label": ml, "sentiment": label,
-                    "sent_score": score,
-                })
-            self._json({"ok": True, "total": db.count_comments(tid),
-                        "returned": len(items), "items": items})
+        for match, handler in self._GET_ROUTES:
+            if match(path):
+                return handler(self, path, qs)
+        self._json({"ok": False, "error": "未知接口"}, 404)
+
+    def _api_post(self, path: str, body: dict) -> None:
+        for match, handler in self._POST_ROUTES:
+            if match(path):
+                return handler(self, path, body)
+        self._json({"ok": False, "error": "未知接口"}, 404)
+
+    # ---- GET 路由 handler ----
+    def _get_health(self, path: str, qs: dict) -> None:
+        self._json({"ok": True, "jieba": HAS_JIEBA, "time": time.time()})
+
+    def _get_watchlist(self, path: str, qs: dict) -> None:
+        items = []
+        for w in db.list_watchlist():
+            item = dict(w)
+            wid = int(item["id"])
+            item["due"] = _watch_due(item)
+            item["running"] = wid in _watch_busy
+            item["latest"] = db.latest_watch_snapshot(wid) or {}
+            item["snapshots"] = db.count_watch_snapshots(wid)
+            items.append(item)
+        self._json({"ok": True, "items": items})
+
+    def _get_watchlist_history(self, path: str, qs: dict) -> None:
+        """某一项的历次快照，前端据此画负面率走势。"""
+        wid = int(path.strip("/").split("/")[2])
+        if not db.get_watch(wid):
+            self._json({"ok": False, "error": "监测项不存在"}, 404)
+            return
+        self._json({"ok": True, "items": db.list_watch_snapshots(wid)})
+
+    def _get_watch_alerts(self, path: str, qs: dict) -> None:
+        raw_limit = (qs.get("limit") or ["100"])[0]
+        try:
+            limit = max(1, min(int(raw_limit), 500))
+        except (TypeError, ValueError):
+            limit = 100
+        unread = (qs.get("unread") or ["0"])[0] in ("1", "true", "yes")
+        self._json({"ok": True, "items": db.list_watch_alerts(limit, unread),
+                    "unread": db.count_unread_alerts()})
+
+    def _get_browser_capture_status(self, path: str, qs: dict) -> None:
+        job_id = path.rsplit("/", 1)[1]
+        job = _CAPTURE_JOBS.get(job_id)
+        if not job:
+            self._json({"ok": False, "error": "采集任务不存在或已过期"}, 404)
+            return
+        self._json({"ok": True, "status": job["status"],
+                    "result": job["result"], "error": job["error"]})
+
+    def _get_browser_keyword_status(self, path: str, qs: dict) -> None:
+        job_id = path.rsplit("/", 1)[1]
+        job = _CAPTURE_JOBS.get(job_id)
+        if not job:
+            self._json({"ok": False, "error": "任务不存在或已过期"}, 404)
+            return
+        self._json({"ok": True, "status": job["status"],
+                    "task_id": job.get("task_id"),
+                    "result": job["result"], "error": job["error"]})
+
+    def _get_platforms(self, path: str, qs: dict) -> None:
+        self._json({"ok": True, "items": [
+            {"platform": c.platform, "label": c.label, "reliability": c.reliability,
+             "hint": c.hint}
+            for c in all_collectors() if c.platform != "generic"]})
+
+    def _get_credentials(self, path: str, qs: dict) -> None:
+        st = status_of(load_settings())
+        with _CAPTURE_LOCK:
+            for a in ACCESS:
+                w = _CAPTURE_WATCHERS.get(a["key"])
+                if w:
+                    if w.get("running") and not w.get("done"):
+                        st[a["key"]]["in_progress"] = True
+                    if w.get("done") and w.get("error"):
+                        st[a["key"]]["capture_error"] = w["error"]
+        self._json({"ok": True,
+                    "browser": bool(browser_cdp.browser_alive()),
+                    "items": [dict(a, **st[a["key"]]) for a in ACCESS]})
+
+    def _get_tasks(self, path: str, qs: dict) -> None:
+        self._json({"ok": True, "items": db.list_tasks()})
+
+    def _get_task_detail(self, path: str, qs: dict) -> None:
+        tid = int(path.rsplit("/", 1)[1])
+        t = db.get_task(tid)
+        if not t:
+            self._json({"ok": False, "error": "任务不存在"}, 404)
+            return
+        t["count"] = db.count_comments(tid)
+        self._json({"ok": True, "task": t})
+
+    def _get_analysis(self, path: str, qs: dict) -> None:
+        tid = int(path.rsplit("/", 1)[1])
+        a = db.get_latest_analysis(tid)
+        self._json({"ok": True, "analysis": a})
+
+    def _get_export_file(self, path: str, qs: dict) -> None:
+        tid = int(path.rsplit("/", 1)[1])
+        fmt = (qs.get("fmt") or ["xlsx"])[0]
+        t = db.get_task(tid)
+        if not t:
+            self._json({"ok": False, "error": "任务不存在"}, 404)
+            return
+        a = db.get_latest_analysis(tid)
+        if not a:
+            self._json({"ok": False, "error": "请先执行一次分析"}, 400)
+            return
+        comments = db.get_comments(tid)
+        if fmt == "xlsx":
+            p = to_excel(t["name"], a["result"], comments)
+        elif fmt == "csv":
+            p = to_csv(t["name"], a["result"], comments)
         else:
-            self._json({"ok": False, "error": "未知接口"}, 404)
+            p = to_html_report(t["name"], a["result"], comments)
+        self._json({"ok": True, "path": str(p), "name": p.name,
+                    "url": f"/exports/{quote(p.name)}"})
+
+    def _get_export_static(self, path: str, qs: dict) -> None:
+        name = Path(path[len("/exports/"):]).name
+        f = EXPORT_DIR / name
+        if f.exists():
+            ctype = "text/html; charset=utf-8" if f.suffix == ".html" else (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                if f.suffix == ".xlsx" else "text/csv; charset=utf-8")
+            # 文件名带中文，必须按 RFC 5987 用 filename* 传（pure-ASCII），
+            # 再给老浏览器留一个 ASCII 兜底名，避免响应头里出现非 latin-1 字符。
+            ascii_name = name.encode("ascii", "ignore").decode() or f"report{f.suffix}"
+            self._send(200, f.read_bytes(), ctype, {
+                "Content-Disposition":
+                    f'attachment; filename="{ascii_name}"; '
+                    f"filename*=UTF-8''{quote(name)}"})
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def _get_settings(self, path: str, qs: dict) -> None:
+        self._json({"ok": True, "settings": load_settings()})
+
+    def _get_sentiment_memory(self, path: str, qs: dict) -> None:
+        self._json({"ok": True, "memory": sentiment_memory.load_memory()})
+
+    def _get_comment_memory(self, path: str, qs: dict) -> None:
+        mem = comment_memory.load_memory()
+        items = [{"key": k, "label": (v or {}).get("label"),
+                  "text": (v or {}).get("text", ""), "at": (v or {}).get("at")}
+                 for k, v in mem.items()]
+        items.sort(key=lambda x: -(x.get("at") or 0))
+        self._json({"ok": True, "count": len(items), "items": items})
+
+    def _get_comments(self, path: str, qs: dict) -> None:
+        tid = int(path.rsplit("/", 1)[1])
+        raw_limit = (qs.get("limit") or ["300"])[0]
+        full = (qs.get("full") or ["0"])[0] in ("1", "true", "yes")
+        keyword = (qs.get("keyword") or [""])[0].strip().lower()
+        try:
+            limit = max(1, min(int(raw_limit), 2000))
+        except (TypeError, ValueError):
+            limit = 300
+        rows = db.get_comments(tid, limit=limit)
+        overrides = sentiment_memory.overrides_to_lexicon(sentiment_memory.load_memory())
+        cmem = comment_memory.load_memory()
+        items = []
+        for r in rows:
+            txt = r.get("content") or ""
+            if keyword and keyword not in txt.lower():
+                continue
+            k = comment_memory.norm_key(txt)
+            ml = comment_memory.label_of(cmem, k)
+            label, score, _hits = score_text(txt, overrides)
+            if ml:
+                label = ml
+            items.append({
+                "id": r.get("id"), "content": (txt if full else txt[:300]),
+                "user_name": r.get("user_name") or "",
+                "like_count": int(r.get("like_count") or 0),
+                "published_at": r.get("published_at"),
+                "key": k, "mem_label": ml, "sentiment": label,
+                "sent_score": score,
+            })
+        self._json({"ok": True, "total": db.count_comments(tid),
+                    "returned": len(items), "items": items})
+
+
+    # ---- POST 路由 handler ----
+    def _post_tasks(self, path: str, body: dict) -> None:
+        raw_urls = body.get("urls")
+        urls: list[str] = []
+        if isinstance(raw_urls, list):
+            urls = [str(u).strip() for u in raw_urls if str(u).strip()]
+        if not urls:
+            u = (body.get("url") or "").strip()
+            if u:
+                urls = [u]
+        if not urls:
+            self._json({"ok": False, "error": "请填写至少一个链接"}, 400)
+            return
+        limit = int(body.get("limit") or 500)
+        sort = (body.get("sort") or "hot").strip()
+        if sort not in ("hot", "new", "both"):
+            sort = "hot"
+        tid = start_collect((body.get("name") or "").strip(), urls, limit, sort)
+        self._json({"ok": True, "task_id": tid, "limit": limit, "sort": sort,
+                    "source_count": len(urls)})
+
+    def _post_watchlist(self, path: str, body: dict) -> None:
+        """加一条长期盯梢的来源。到期后自动增量采集 + 分析 + 落预警。"""
+        url = (body.get("url") or "").strip()
+        if not url:
+            self._json({"ok": False, "error": "请填写要监测的链接"}, 400)
+            return
+        try:
+            hours = int(body.get("interval_hours") or 24)
+        except (TypeError, ValueError):
+            hours = 24
+        hours = max(1, min(hours, 720))  # 1 小时 ~ 30 天，再密意义不大
+        wid = db.add_watch((body.get("name") or url[:40]).strip(), url,
+                           (body.get("platform") or "").strip(), hours)
+        self._json({"ok": True, "id": wid, "interval_hours": hours})
+
+    def _post_watchlist_toggle(self, path: str, body: dict) -> None:
+        """启停。不传 enabled 就是反转当前状态。"""
+        wid = int(path.strip("/").split("/")[2])
+        cur = db.get_watch(wid)
+        if not cur:
+            self._json({"ok": False, "error": "监测项不存在"}, 404)
+            return
+        want = body.get("enabled")
+        enabled = bool(want) if want is not None else not int(cur.get("enabled") or 0)
+        db.set_watch_enabled(wid, enabled)
+        self._json({"ok": True, "enabled": enabled})
+
+    def _post_watchlist_remove(self, path: str, body: dict) -> None:
+        """前端用的是 POST .../remove（不是 DELETE），两条都留着。"""
+        wid = int(path.strip("/").split("/")[2])
+        db.remove_watch(wid)
+        self._json({"ok": True})
+
+    def _post_watchlist_run(self, path: str, body: dict) -> None:
+        """手动立刻跑一次，不等到期（刚加上的时候想马上看一眼）。"""
+        wid = int(path.strip("/").split("/")[2])
+        w = db.get_watch(wid)
+        if not w:
+            self._json({"ok": False, "error": "监测项不存在"}, 404)
+            return
+        with _WATCH_BUSY_LOCK:
+            if wid in _watch_busy:
+                self._json({"ok": False, "error": "这一条正在采集中"}, 409)
+                return
+            _watch_busy.add(wid)
+        threading.Thread(target=_run_watch_guarded, args=(w,), daemon=True).start()
+        self._json({"ok": True, "running": True})
+
+    def _post_watch_alerts_read(self, path: str, body: dict) -> None:
+        """预警标已读。不传 ids 就是全部已读。"""
+        ids = [int(i) for i in (body.get("ids") or []) if str(i).strip().lstrip("-").isdigit()]
+        n = db.mark_alerts_read(ids or None)
+        self._json({"ok": True, "updated": n})
+
+    def _post_browser_capture(self, path: str, body: dict) -> None:
+        platform = (body.get("platform") or "").strip()
+        url = (body.get("url") or "").strip()
+        if platform not in ("douyin", "xiaohongshu"):
+            self._json({"ok": False, "error": "该平台不支持浏览器采集（仅抖音/小红书）"}, 400)
+            return
+        if not url:
+            self._json({"ok": False, "error": "请填写链接"}, 400)
+            return
+        if platform == "douyin" and "douyin.com" not in url and "iesdouyin.com" not in url:
+            self._json({"ok": False, "error": "链接不是抖音视频页（需 https://www.douyin.com/video/xxxx）"}, 400)
+            return
+        if platform == "xiaohongshu" and "xiaohongshu.com" not in url and "xhslink.com" not in url:
+            self._json({"ok": False, "error": "链接不是小红书笔记页（需 xiaohongshu.com/explore/... 或 xhslink.com）"}, 400)
+            return
+        target = max(1, min(int(body.get("target") or 500), 20000))
+        job_id = start_browser_capture(platform, url, target)
+        self._json({"ok": True, "job_id": job_id})
+
+    def _post_discover(self, path: str, body: dict) -> None:
+        """关键词搜索：发现值得监测的来源（借鉴 MediaCrawler 的 search 模式）。"""
+        kw = (body.get("keyword") or "").strip()
+        if not kw:
+            self._json({"ok": False, "error": "请填写关键词"}, 400)
+            return
+        platform = (body.get("platform") or "bilibili").strip()
+        if platform not in DISCOVERY_PLATFORMS:
+            self._json({"ok": False, "error": "该平台暂不支持关键词发现（支持："
+                        + " / ".join(DISCOVERY_PLATFORMS.keys()) + "）"}, 400)
+            return
+        cfg = DISCOVERY_PLATFORMS.get(platform, {})
+        settings = load_settings()
+        if cfg.get("browser"):
+            self._json({"ok": False, "error": f"{cfg.get('label')} 的搜索需在已登录浏览器中进行，请直接使用「搜索并采集」按钮"}, 200)
+            return
+        if cfg.get("search_unavailable"):
+            self._json({"ok": False, "error": f"{cfg.get('label')} 暂不支持关键词搜索：{cfg.get('note', '')}"}, 200)
+            return
+        if cfg.get("needs_login") and not cookie_for(settings, platform):
+            self._json({"ok": False, "error": f"{cfg.get('label')} 需要先登录：请在『平台接入』里点「打开登录页」登录后点「一键获取」"}, 200)
+            return
+        limit = max(1, min(int(body.get("limit") or 20), 50))
+        sort = (body.get("sort") or "hot").strip()
+        try:
+            items = search(platform, kw, limit=limit, sort=sort, settings=settings)
+        except Exception as exc:  # noqa: BLE001
+            self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 200)
+            return
+        self._json({"ok": True, "platform": platform, "keyword": kw,
+                    "count": len(items), "items": items,
+                    "reliability": cfg.get("reliability", ""),
+                    "note": cfg.get("note", ""),
+                    "empty_hint": ("该平台搜索接口当前不可达，可直接在上方粘贴链接采集"
+                                   if not items else "")})
+
+    def _post_keyword_collect(self, path: str, body: dict) -> None:
+        kw = (body.get("keyword") or "").strip()
+        if not kw:
+            self._json({"ok": False, "error": "请填写关键词"}, 400)
+            return
+        platform = (body.get("platform") or "bilibili").strip()
+        if platform not in DISCOVERY_PLATFORMS:
+            self._json({"ok": False, "error": "该平台暂不支持关键词采集（支持："
+                        + " / ".join(DISCOVERY_PLATFORMS.keys()) + "）"}, 400)
+            return
+        cfg = DISCOVERY_PLATFORMS.get(platform, {})
+        video_limit = max(1, min(int(body.get("video_limit") or 5), 30))
+        comment_limit = max(10, min(int(body.get("comment_limit") or 300), 20000))
+        sort = (body.get("sort") or "hot").strip()
+        settings = load_settings()
+        if cfg.get("browser"):
+            job_id = start_browser_keyword_collect(platform, kw, video_limit,
+                                                  comment_limit, sort,
+                                                  label=cfg.get("label", ""))
+            self._json({"ok": True, "browser": True, "job_id": job_id,
+                        "platform": platform, "keyword": kw,
+                        "video_limit": video_limit, "comment_limit": comment_limit,
+                        "message": f"已在已登录浏览器中搜索「{kw}」并抓取热度前 {video_limit} 条"
+                                   f"（多来源合并为一个任务，每条最多 {comment_limit} 条评论）"})
+            return
+        if cfg.get("search_unavailable"):
+            self._json({"ok": False, "error": f"{cfg.get('label')} 暂不支持关键词搜索：{cfg.get('note', '')}"}, 200)
+            return
+        if cfg.get("needs_login") and not cookie_for(settings, platform):
+            self._json({"ok": False, "error": f"{cfg.get('label')} 需要先登录：请在『平台接入』里点「打开登录页」登录后点「一键获取」"}, 200)
+            return
+        pool = search(platform, kw, limit=max(video_limit * 2, 20), sort=sort,
+                      settings=settings)
+        if not pool:
+            self._json({"ok": False, "error": f"没有搜到「{kw}」相关结果（"
+                        + cfg.get("note", "") + "）"}, 200)
+            return
+        ranked = self._rank_videos(pool, platform)[:video_limit]
+        urls = [v["url"] for v in ranked]
+        collect_sort = "new" if sort == "new" else "hot"
+        name = f"{kw} · {cfg.get('label', '')}热度前{len(urls)}"
+        try:
+            tid = start_collect(name, urls, comment_limit, collect_sort)
+        except Exception as exc:  # noqa: BLE001
+            self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 200)
+            return
+        self._json({"ok": True, "task_id": tid, "keyword": kw, "platform": platform,
+                    "video_limit": len(urls), "comment_limit": comment_limit,
+                    "videos": [dict(v) for v in ranked]})
+
+    def _post_task_recollect(self, path: str, body: dict) -> None:
+        try:
+            tid = int(path.split("/")[3])
+        except (IndexError, ValueError):
+            self._json({"ok": False, "error": "任务 ID 无效"}, 400)
+            return
+        limit = int(body.get("limit") or 500)
+        sort = (body.get("sort") or "hot").strip()
+        if sort not in ("hot", "new", "both"):
+            sort = "hot"
+        ok, err = recollect(tid, limit, sort)
+        self._json({"ok": ok, "error": err})
+
+    def _post_preview(self, path: str, body: dict) -> None:
+        """同步试抓少量样本，方便先确认能不能抓到。"""
+        url = (body.get("url") or "").strip()
+        if not url:
+            self._json({"ok": False, "error": "请填写链接"}, 400)
+            return
+        c = route(url)
+        if c is None:
+            self._json({"ok": False, "error": "无法识别平台"}, 400)
+            return
+        try:
+            want = int(body.get("limit") or 20)
+            sort = (body.get("sort") or "hot").strip()
+            if sort not in ("hot", "new", "both"):
+                sort = "hot"
+            res = c.collect(url, limit=want, settings=load_settings(), sort=sort)
+            rows = res.to_rows()[:want]
+            self._json({"ok": True, "platform": c.platform, "label": c.label,
+                        "reliability": c.reliability, "title": res.source_title,
+                        "warnings": res.warnings, "count": len(rows), "samples": rows,
+                        "requested": want, "complete": res.complete,
+                        "available": res.available,
+                        "stop_reason": res.stop_reason, "capacity_hint": res.capacity_hint})
+        except Exception as exc:  # noqa: BLE001
+            self._json({"ok": False, "platform": c.platform, "label": c.label,
+                        "reliability": c.reliability, "error": f"{type(exc).__name__}: {exc}",
+                        "hint": c.hint}, 200)
+
+    def _post_import(self, path: str, body: dict) -> None:
+        raw = body.get("text") or ""
+        fmt = body.get("fmt") or "auto"
+        rows = parse_import(raw, fmt)
+        if not rows:
+            self._json({"ok": False, "error": "没有解析到任何评论，请检查格式"}, 400)
+            return
+        name = (body.get("name") or f"手动导入 {time.strftime('%m-%d %H:%M')}").strip()
+        platform, src_url, src_title = "manual", "", ""
+        if fmt in ("auto", "json") and raw.lstrip().startswith("{"):
+            try:
+                meta = json.loads(raw)
+                if isinstance(meta, dict):
+                    platform = str(meta.get("platform") or "manual")
+                    src_url = str(meta.get("source_url") or "")
+                    src_title = str(meta.get("source_title") or "")
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            append_id = int(body.get("task_id") or 0)
+        except (TypeError, ValueError):
+            append_id = 0
+        if append_id and db.get_task(append_id):
+            n = db.insert_comments(append_id, rows)
+            self._json({"ok": True, "task_id": append_id, "count": n,
+                        "total": db.count_comments(append_id), "appended": True})
+            return
+        tid = db.create_task(name, platform, src_url, {"fmt": fmt})
+        n = db.insert_comments(tid, rows)
+        db.update_task(tid, status="done", total=n, finished_at=time.time(),
+                       message=f"导入 {n} 条",
+                       source_title=f"{src_title}（{name}）" if src_title else name)
+        self._json({"ok": True, "task_id": tid, "count": n})
+
+    def _post_analyze(self, path: str, body: dict) -> None:
+        tid = int(path.rsplit("/", 1)[1])
+        t = db.get_task(tid)
+        if not t:
+            self._json({"ok": False, "error": "任务不存在"}, 404)
+            return
+        comments = db.get_comments(tid)
+        if not comments:
+            self._json({"ok": False, "error": "该任务还没有评论数据"}, 400)
+            return
+        if t.get("status") in ("running", "pending") and not body.get("force"):
+            # params.limit 是「每个来源」的上限，乘来源数才是本次总目标，否则会出现「已入库 600 / 目标 300」的矛盾提示
+            target = 0
+            try:
+                cfg = json.loads(t.get("params") or "{}") or {}
+                per = int(cfg.get("limit") or 0)
+                nsrc = len(cfg.get("sources") or []) or 1
+                target = per * nsrc
+            except Exception:  # noqa: BLE001
+                target = 0
+            self._json({
+                "ok": False, "code": "collecting",
+                "collected": len(comments), "target": target,
+                "error": f"该任务还在采集中，当前已入库 {len(comments)} 条；"
+                         f"现在分析只会覆盖这部分数据",
+            }, 200)
+            return
+        params = {k: v for k, v in body.items() if k not in ("task_id", "force")}
+        result = analyze(comments, params)
+        stats = result.setdefault("stats", {})
+        stats["task_total"] = db.count_comments(tid)
+        aid = db.save_analysis(tid, params, result)
+        if t.get("status") == "done":
+            db.update_task(tid, message=f"分析完成（本次分析 {stats.get('total', 0)} 条）")
+        self._json({"ok": True, "analysis_id": aid, "result": result})
+
+    def _post_settings(self, path: str, body: dict) -> None:
+        save_settings(body.get("settings") or {})
+        self._json({"ok": True})
+
+    def _post_sentiment_memory(self, path: str, body: dict) -> None:
+        """情感标签记忆：POST {word, label} 设置/更新（label=positive/neutral/negative）。GET 在 _api_get 中处理。"""
+        word = (body.get("word") or "").strip()
+        label = (body.get("label") or "").strip()
+        if not word:
+            self._json({"ok": False, "error": "请指定词条"}, 400)
+            return
+        if label not in ("positive", "neutral", "negative"):
+            self._json({"ok": False, "error": "标签必须是 positive/neutral/negative"}, 400)
+            return
+        try:
+            entry = sentiment_memory.set_label(word, label, by="user")
+        except ValueError as exc:
+            self._json({"ok": False, "error": str(exc)}, 400)
+            return
+        self._json({"ok": True, "word": word, "label": label, "entry": entry,
+                    "message": "已记住该词条的情感标签，下次分析将自动应用"})
+        return
+
+    def _post_comment_sentiment(self, path: str, body: dict) -> None:
+        """语句级情感记忆：POST {key?, text?, label} 记住某条评论 / 语句的标签。
+        key 由分析结果给出（基于完整正文算的指纹，避免前端截断导致对不上）；
+        没有 key 时用 text 现算。
+        """
+        key = (body.get("key") or "").strip()
+        text = (body.get("text") or "").strip()
+        label = (body.get("label") or "").strip()
+        if label not in ("positive", "neutral", "negative"):
+            self._json({"ok": False, "error": "标签必须是 positive/neutral/negative"}, 400)
+            return
+        try:
+            comment_memory.save(key=key, label=label, text=text, by="user")
+        except ValueError as exc:
+            self._json({"ok": False, "error": str(exc)}, 400)
+            return
+        self._json({"ok": True, "key": key or comment_memory.norm_key(text),
+                    "label": label,
+                    "message": "已记住这条评论的情感标签，重新分析或再次采集到相同内容时会自动应用"})
+        return
+
+    def _post_comment_memory_delete(self, path: str, body: dict) -> None:
+        """撤销一条语句记忆。"""
+        key = (body.get("key") or "").strip()
+        if not key:
+            self._json({"ok": False, "error": "缺少 key"}, 400)
+            return
+        self._json({"ok": True, "removed": comment_memory.remove(key)})
+        return
+
+    def _post_credentials_open(self, path: str, body: dict) -> None:
+        """点登录：拉起带调试端口的浏览器并打开该平台的登录页。"""
+        key = (body.get("platform") or "").strip()
+        a = BY_KEY.get(key)
+        if not a:
+            self._json({"ok": False, "error": "未知平台"}, 400)
+            return
+        if a["kind"] == "key":
+            webbrowser.open(a["login_url"])
+            self._json({"ok": True, "manual": True,
+                        "message": "已打开 API Key 申请页，拿到后粘贴到下方输入框"})
+            return
+        r = browser_cdp.launch(a["login_url"])
+        if not r.get("ok"):
+            self._json(r, 200)
+            return
+        with _CAPTURE_LOCK:
+            _CAPTURE_WATCHERS[key] = {"running": True, "done": False,
+                                      "error": "", "result": None, "started": time.time()}
+        threading.Thread(target=_auto_capture_loop, args=(key, a), daemon=True).start()
+        self._json({"ok": True, "watching": True,
+                    "message": "已打开登录页，登录后工具会自动读取登录态（请保持浏览器打开直到显示「已接入」）"})
+
+    def _post_credentials_capture(self, path: str, body: dict) -> None:
+        """一键获取：从浏览器里读出该平台的 Cookie 并保存。"""
+        key = (body.get("platform") or "").strip()
+        a = BY_KEY.get(key)
+        if not a or not a["setting"]:
+            self._json({"ok": False, "error": "该平台不需要 Cookie"}, 400)
+            return
+        r = browser_cdp.get_cookies(a["domains"], require_marker=a.get("login_marker", ""))
+        if not r.get("ok"):
+            self._json(r, 200)
+            return
+        s = load_settings()
+        s[a["setting"]] = r["cookie"]
+        save_settings(s)
+        self._json({"ok": True, "platform": key, "count": r["count"],
+                    "fields": r["fields"],
+                    "masked": status_of(s)[key]["masked"],
+                    "message": f"已写入 {a['label']} 登录态（{r['count']} 个字段），下次采集生效"})
+
+    def _post_credentials_save(self, path: str, body: dict) -> None:
+        """手动粘贴 Cookie / API Key。"""
+        key = (body.get("platform") or "").strip()
+        a = BY_KEY.get(key)
+        if not a or not a["setting"]:
+            self._json({"ok": False, "error": "该平台不需要凭据"}, 400)
+            return
+        s = load_settings()
+        val = str(body.get("value") or "").strip()
+        if val:
+            s[a["setting"]] = val
+        else:
+            s.pop(a["setting"], None)
+        save_settings(s)
+        self._json({"ok": True, "state": status_of(s)[key]["state"]})
+
+    def _post_credentials_clear(self, path: str, body: dict) -> None:
+        key = (body.get("platform") or "").strip()
+        a = BY_KEY.get(key)
+        if not a or not a["setting"]:
+            self._json({"ok": False, "error": "该平台不需要凭据"}, 400)
+            return
+        s = load_settings()
+        s.pop(a["setting"], None)
+        save_settings(s)
+        self._json({"ok": True})
+
+    def _post_credentials_close(self, path: str, body: dict) -> None:
+        r = browser_cdp.quit_browser()
+        self._json(r)
+
+    def _post_merge(self, path: str, body: dict) -> None:
+        ids = body.get("task_ids") or []
+        name = (body.get("name") or "合并任务").strip()
+        if not ids:
+            self._json({"ok": False, "error": "请选择要合并的任务"}, 400)
+            return
+        tid = db.create_task(name, "merged", "", {"from": ids})
+        n = db.merge_task(tid, [int(i) for i in ids])
+        db.update_task(tid, status="done", total=n, finished_at=time.time(),
+                       message=f"合并 {n} 条", source_title=name)
+        self._json({"ok": True, "task_id": tid, "count": n})
+
 
     @staticmethod
     def _rank_videos(items: list[dict], platform: str) -> list[dict]:
@@ -735,383 +1223,51 @@ class Handler(BaseHTTPRequestHandler):
             return items
         return sorted(items, key=lambda v: (v.get(key) or 0), reverse=True)
 
+    _GET_ROUTES = [
+        (lambda p: p == '/api/health', _get_health),
+        (lambda p: p == '/api/watchlist', _get_watchlist),
+        (lambda p: p.startswith('/api/watchlist/') and p.endswith('/history'), _get_watchlist_history),
+        (lambda p: p == '/api/watch-alerts', _get_watch_alerts),
+        (lambda p: p.startswith('/api/browser-capture/'), _get_browser_capture_status),
+        (lambda p: p.startswith('/api/browser-keyword-collect/'), _get_browser_keyword_status),
+        (lambda p: p == '/api/platforms', _get_platforms),
+        (lambda p: p == '/api/credentials', _get_credentials),
+        (lambda p: p == '/api/tasks', _get_tasks),
+        (lambda p: p.startswith('/api/tasks/'), _get_task_detail),
+        (lambda p: p.startswith('/api/analysis/'), _get_analysis),
+        (lambda p: p.startswith('/api/export/'), _get_export_file),
+        (lambda p: p.startswith('/exports/'), _get_export_static),
+        (lambda p: p == '/api/settings', _get_settings),
+        (lambda p: p == '/api/sentiment-memory', _get_sentiment_memory),
+        (lambda p: p == '/api/comment-memory', _get_comment_memory),
+        (lambda p: p.startswith('/api/comments/'), _get_comments),
+    ]
 
-    def _api_post(self, path: str, body: dict) -> None:
-        if path == "/api/tasks":
-            # 支持一次提交多个来源（批量采集），合并为一个任务
-            raw_urls = body.get("urls")
-            urls: list[str] = []
-            if isinstance(raw_urls, list):
-                urls = [str(u).strip() for u in raw_urls if str(u).strip()]
-            if not urls:
-                u = (body.get("url") or "").strip()
-                if u:
-                    urls = [u]
-            if not urls:
-                self._json({"ok": False, "error": "请填写至少一个链接"}, 400)
-                return
-            limit = int(body.get("limit") or 500)
-            sort = (body.get("sort") or "hot").strip()
-            if sort not in ("hot", "new", "both"):
-                sort = "hot"
-            tid = start_collect((body.get("name") or "").strip(), urls, limit, sort)
-            self._json({"ok": True, "task_id": tid, "limit": limit, "sort": sort,
-                        "source_count": len(urls)})
-        elif path == "/api/browser-capture":
-            # 抖音 / 小红书 等签名风控平台：拉起已登录浏览器自动采集并回传
-            platform = (body.get("platform") or "").strip()
-            url = (body.get("url") or "").strip()
-            if platform not in ("douyin", "xiaohongshu"):
-                self._json({"ok": False, "error": "该平台不支持浏览器采集（仅抖音/小红书）"}, 400)
-                return
-            if not url:
-                self._json({"ok": False, "error": "请填写链接"}, 400)
-                return
-            if platform == "douyin" and "douyin.com" not in url and "iesdouyin.com" not in url:
-                self._json({"ok": False, "error": "链接不是抖音视频页（需 https://www.douyin.com/video/xxxx）"}, 400)
-                return
-            if platform == "xiaohongshu" and "xiaohongshu.com" not in url and "xhslink.com" not in url:
-                self._json({"ok": False, "error": "链接不是小红书笔记页（需 xiaohongshu.com/explore/... 或 xhslink.com）"}, 400)
-                return
-            target = max(1, min(int(body.get("target") or 500), 20000))
-            job_id = start_browser_capture(platform, url, target)
-            self._json({"ok": True, "job_id": job_id})
-        elif path == "/api/discover":
-            """关键词搜索：发现值得监测的来源（借鉴 MediaCrawler 的 search 模式）。"""
-            kw = (body.get("keyword") or "").strip()
-            if not kw:
-                self._json({"ok": False, "error": "请填写关键词"}, 400)
-                return
-            platform = (body.get("platform") or "bilibili").strip()
-            if platform not in DISCOVERY_PLATFORMS:
-                self._json({"ok": False, "error": "该平台暂不支持关键词发现（支持："
-                            + " / ".join(DISCOVERY_PLATFORMS.keys()) + "）"}, 400)
-                return
-            cfg = DISCOVERY_PLATFORMS.get(platform, {})
-            settings = load_settings()
-            if cfg.get("browser"):
-                self._json({"ok": False, "error": f"{cfg.get('label')} 的搜索需在已登录浏览器中进行，请直接使用「搜索并采集」按钮"}, 200)
-                return
-            if cfg.get("search_unavailable"):
-                self._json({"ok": False, "error": f"{cfg.get('label')} 暂不支持关键词搜索：{cfg.get('note', '')}"}, 200)
-                return
-            if cfg.get("needs_login") and not cookie_for(settings, platform):
-                self._json({"ok": False, "error": f"{cfg.get('label')} 需要先登录：请在『平台接入』里点「打开登录页」登录后点「一键获取」"}, 200)
-                return
-            limit = max(1, min(int(body.get("limit") or 20), 50))
-            sort = (body.get("sort") or "hot").strip()
-            try:
-                items = search(platform, kw, limit=limit, sort=sort, settings=settings)
-            except Exception as exc:  # noqa: BLE001
-                self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 200)
-                return
-            self._json({"ok": True, "platform": platform, "keyword": kw,
-                        "count": len(items), "items": items,
-                        "reliability": cfg.get("reliability", ""),
-                        "note": cfg.get("note", ""),
-                        "empty_hint": ("该平台搜索接口当前不可达，可直接在上方粘贴链接采集"
-                                       if not items else "")})
-        elif path == "/api/keyword-collect":
-            # 关键词 → 搜索 → 取热度前 N 个来源 → 逐条抓评论，合并为一个任务
-            kw = (body.get("keyword") or "").strip()
-            if not kw:
-                self._json({"ok": False, "error": "请填写关键词"}, 400)
-                return
-            platform = (body.get("platform") or "bilibili").strip()
-            if platform not in DISCOVERY_PLATFORMS:
-                self._json({"ok": False, "error": "该平台暂不支持关键词采集（支持："
-                            + " / ".join(DISCOVERY_PLATFORMS.keys()) + "）"}, 400)
-                return
-            cfg = DISCOVERY_PLATFORMS.get(platform, {})
-            video_limit = max(1, min(int(body.get("video_limit") or 5), 30))
-            comment_limit = max(10, min(int(body.get("comment_limit") or 300), 20000))
-            sort = (body.get("sort") or "hot").strip()
-            settings = load_settings()
-            # 抖音 / 小红书：搜索也过风控，交给浏览器助手（搜索 + 逐条抓评论同一会话）
-            if cfg.get("browser"):
-                job_id = start_browser_keyword_collect(platform, kw, video_limit,
-                                                      comment_limit, sort,
-                                                      label=cfg.get("label", ""))
-                self._json({"ok": True, "browser": True, "job_id": job_id,
-                            "platform": platform, "keyword": kw,
-                            "video_limit": video_limit, "comment_limit": comment_limit,
-                            "message": f"已在已登录浏览器中搜索「{kw}」并抓取热度前 {video_limit} 条"
-                                       f"（多来源合并为一个任务，每条最多 {comment_limit} 条评论）"})
-                return
-            if cfg.get("search_unavailable"):
-                self._json({"ok": False, "error": f"{cfg.get('label')} 暂不支持关键词搜索：{cfg.get('note', '')}"}, 200)
-                return
-            # 需要登录的平台：没 Cookie 直接提示先登录（其余平台匿名也能搜）
-            if cfg.get("needs_login") and not cookie_for(settings, platform):
-                self._json({"ok": False, "error": f"{cfg.get('label')} 需要先登录：请在『平台接入』里点「打开登录页」登录后点「一键获取」"}, 200)
-                return
-            # 先多搜一些形成候选池，再按热度取前 N
-            pool = search(platform, kw, limit=max(video_limit * 2, 20), sort=sort,
-                          settings=settings)
-            if not pool:
-                self._json({"ok": False, "error": f"没有搜到「{kw}」相关结果（"
-                            + cfg.get("note", "") + "）"}, 200)
-                return
-            ranked = self._rank_videos(pool, platform)[:video_limit]
-            urls = [v["url"] for v in ranked]
-            collect_sort = "new" if sort == "new" else "hot"
-            name = f"{kw} · {cfg.get('label', '')}热度前{len(urls)}"
-            try:
-                tid = start_collect(name, urls, comment_limit, collect_sort)
-            except Exception as exc:  # noqa: BLE001
-                self._json({"ok": False, "error": f"{type(exc).__name__}: {exc}"}, 200)
-                return
-            self._json({"ok": True, "task_id": tid, "keyword": kw, "platform": platform,
-                        "video_limit": len(urls), "comment_limit": comment_limit,
-                        "videos": [dict(v) for v in ranked]})
-        elif path.startswith("/api/tasks/") and path.endswith("/recollect"):
-            try:
-                tid = int(path.split("/")[3])
-            except (IndexError, ValueError):
-                self._json({"ok": False, "error": "任务 ID 无效"}, 400)
-                return
-            limit = int(body.get("limit") or 500)
-            sort = (body.get("sort") or "hot").strip()
-            if sort not in ("hot", "new", "both"):
-                sort = "hot"
-            ok, err = recollect(tid, limit, sort)
-            self._json({"ok": ok, "error": err})
-        elif path == "/api/preview":
-            """同步试抓少量样本，方便先确认能不能抓到。"""
-            url = (body.get("url") or "").strip()
-            if not url:
-                self._json({"ok": False, "error": "请填写链接"}, 400)
-                return
-            c = route(url)
-            if c is None:
-                self._json({"ok": False, "error": "无法识别平台"}, 400)
-                return
-            try:
-                want = int(body.get("limit") or 20)
-                sort = (body.get("sort") or "hot").strip()
-                if sort not in ("hot", "new", "both"):
-                    sort = "hot"
-                res = c.collect(url, limit=want, settings=load_settings(), sort=sort)
-                rows = res.to_rows()[:want]
-                self._json({"ok": True, "platform": c.platform, "label": c.label,
-                            "reliability": c.reliability, "title": res.source_title,
-                            "warnings": res.warnings, "count": len(rows), "samples": rows,
-                            "requested": want, "complete": res.complete,
-                            "available": res.available,
-                            "stop_reason": res.stop_reason, "capacity_hint": res.capacity_hint})
-            except Exception as exc:  # noqa: BLE001
-                self._json({"ok": False, "platform": c.platform, "label": c.label,
-                            "reliability": c.reliability, "error": f"{type(exc).__name__}: {exc}",
-                            "hint": c.hint}, 200)
-        elif path == "/api/import":
-            raw = body.get("text") or ""
-            fmt = body.get("fmt") or "auto"
-            rows = parse_import(raw, fmt)
-            if not rows:
-                self._json({"ok": False, "error": "没有解析到任何评论，请检查格式"}, 400)
-                return
-            name = (body.get("name") or f"手动导入 {time.strftime('%m-%d %H:%M')}").strip()
-            # 浏览器助手导出的 JSON 带平台/来源元信息，用它们还原真实的来源标记
-            platform, src_url, src_title = "manual", "", ""
-            if fmt in ("auto", "json") and raw.lstrip().startswith("{"):
-                try:
-                    meta = json.loads(raw)
-                    if isinstance(meta, dict):
-                        platform = str(meta.get("platform") or "manual")
-                        src_url = str(meta.get("source_url") or "")
-                        src_title = str(meta.get("source_title") or "")
-                except Exception:  # noqa: BLE001
-                    pass
-            # 追加模式：浏览器关键词采集把多个视频/笔记的评论并进同一个任务，
-            # 与服务端直连路径口径对齐（有效评论随来源数累加）。
-            # 任务状态由发起方（start_browser_keyword_collect）统一维护，这里只入库。
-            try:
-                append_id = int(body.get("task_id") or 0)
-            except (TypeError, ValueError):
-                append_id = 0
-            if append_id and db.get_task(append_id):
-                n = db.insert_comments(append_id, rows)
-                self._json({"ok": True, "task_id": append_id, "count": n,
-                            "total": db.count_comments(append_id), "appended": True})
-                return
-            tid = db.create_task(name, platform, src_url, {"fmt": fmt})
-            n = db.insert_comments(tid, rows)
-            db.update_task(tid, status="done", total=n, finished_at=time.time(),
-                           message=f"导入 {n} 条",
-                           source_title=f"{src_title}（{name}）" if src_title else name)
-            self._json({"ok": True, "task_id": tid, "count": n})
-        elif path.startswith("/api/analyze/"):
-            tid = int(path.rsplit("/", 1)[1])
-            t = db.get_task(tid)
-            if not t:
-                self._json({"ok": False, "error": "任务不存在"}, 404)
-                return
-            comments = db.get_comments(tid)
-            if not comments:
-                self._json({"ok": False, "error": "该任务还没有评论数据"}, 400)
-                return
-            # 采集尚未结束时不要静默出结果：那样只会分析到当前已入库的一小部分
-            # （多来源任务往往只抓完第 1~2 个），很容易被误当成全量。前端据 code=collecting 二次确认。
-            # pending 也算「没结束」—— 排在队里还没开抓，这时分析同样只能看到一小部分。
-            if t.get("status") in ("running", "pending") and not body.get("force"):
-                # params.limit 是「每个来源」的上限，乘来源数才是本次总目标，否则会出现「已入库 600 / 目标 300」的矛盾提示
-                target = 0
-                try:
-                    cfg = json.loads(t.get("params") or "{}") or {}
-                    per = int(cfg.get("limit") or 0)
-                    nsrc = len(cfg.get("sources") or []) or 1
-                    target = per * nsrc
-                except Exception:  # noqa: BLE001
-                    target = 0
-                self._json({
-                    "ok": False, "code": "collecting",
-                    "collected": len(comments), "target": target,
-                    "error": f"该任务还在采集中，当前已入库 {len(comments)} 条；"
-                             f"现在分析只会覆盖这部分数据",
-                }, 200)
-                return
-            params = {k: v for k, v in body.items() if k not in ("task_id", "force")}
-            result = analyze(comments, params)
-            stats = result.setdefault("stats", {})
-            # 本次分析条数 vs 任务库中总条数，便于一眼看出是否被截取
-            stats["task_total"] = db.count_comments(tid)
-            aid = db.save_analysis(tid, params, result)
-            # 只更新提示语，且绝不覆盖 finished_at（那是采集完成时间，不属于分析）
-            if t.get("status") == "done":
-                db.update_task(tid, message=f"分析完成（本次分析 {stats.get('total', 0)} 条）")
-            self._json({"ok": True, "analysis_id": aid, "result": result})
-        elif path == "/api/settings":
-            save_settings(body.get("settings") or {})
-            self._json({"ok": True})
-        elif path == "/api/sentiment-memory":
-            """情感标签记忆：POST {word, label} 设置/更新（label=positive/neutral/negative）。GET 在 _api_get 中处理。"""
-            word = (body.get("word") or "").strip()
-            label = (body.get("label") or "").strip()
-            if not word:
-                self._json({"ok": False, "error": "请指定词条"}, 400)
-                return
-            if label not in ("positive", "neutral", "negative"):
-                self._json({"ok": False, "error": "标签必须是 positive/neutral/negative"}, 400)
-                return
-            try:
-                entry = sentiment_memory.set_label(word, label, by="user")
-            except ValueError as exc:
-                self._json({"ok": False, "error": str(exc)}, 400)
-                return
-            self._json({"ok": True, "word": word, "label": label, "entry": entry,
-                        "message": "已记住该词条的情感标签，下次分析将自动应用"})
-            return
-        elif path == "/api/comment-sentiment":
-            """语句级情感记忆：POST {key?, text?, label} 记住某条评论 / 语句的标签。
-
-            key 由分析结果给出（基于完整正文算的指纹，避免前端截断导致对不上）；
-            没有 key 时用 text 现算。
-            """
-            key = (body.get("key") or "").strip()
-            text = (body.get("text") or "").strip()
-            label = (body.get("label") or "").strip()
-            if label not in ("positive", "neutral", "negative"):
-                self._json({"ok": False, "error": "标签必须是 positive/neutral/negative"}, 400)
-                return
-            try:
-                comment_memory.save(key=key, label=label, text=text, by="user")
-            except ValueError as exc:
-                self._json({"ok": False, "error": str(exc)}, 400)
-                return
-            self._json({"ok": True, "key": key or comment_memory.norm_key(text),
-                        "label": label,
-                        "message": "已记住这条评论的情感标签，重新分析或再次采集到相同内容时会自动应用"})
-            return
-        elif path == "/api/comment-memory/delete":
-            """撤销一条语句记忆。"""
-            key = (body.get("key") or "").strip()
-            if not key:
-                self._json({"ok": False, "error": "缺少 key"}, 400)
-                return
-            self._json({"ok": True, "removed": comment_memory.remove(key)})
-            return
-        elif path == "/api/credentials/open":
-            """点登录：拉起带调试端口的浏览器并打开该平台的登录页。"""
-            key = (body.get("platform") or "").strip()
-            a = BY_KEY.get(key)
-            if not a:
-                self._json({"ok": False, "error": "未知平台"}, 400)
-                return
-            if a["kind"] == "key":
-                webbrowser.open(a["login_url"])
-                self._json({"ok": True, "manual": True,
-                            "message": "已打开 API Key 申请页，拿到后粘贴到下方输入框"})
-                return
-            r = browser_cdp.launch(a["login_url"])
-            if not r.get("ok"):
-                self._json(r, 200)
-                return
-            # 启动后台自动捕获：登录后自动把 Cookie 写回 settings.json
-            with _CAPTURE_LOCK:
-                _CAPTURE_WATCHERS[key] = {"running": True, "done": False,
-                                          "error": "", "result": None, "started": time.time()}
-            threading.Thread(target=_auto_capture_loop, args=(key, a), daemon=True).start()
-            self._json({"ok": True, "watching": True,
-                        "message": "已打开登录页，登录后工具会自动读取登录态（请保持浏览器打开直到显示「已接入」）"})
-        elif path == "/api/credentials/capture":
-            """一键获取：从浏览器里读出该平台的 Cookie 并保存。"""
-            key = (body.get("platform") or "").strip()
-            a = BY_KEY.get(key)
-            if not a or not a["setting"]:
-                self._json({"ok": False, "error": "该平台不需要 Cookie"}, 400)
-                return
-            r = browser_cdp.get_cookies(a["domains"], require_marker=a.get("login_marker", ""))
-            if not r.get("ok"):
-                self._json(r, 200)
-                return
-            s = load_settings()
-            s[a["setting"]] = r["cookie"]
-            save_settings(s)
-            self._json({"ok": True, "platform": key, "count": r["count"],
-                        "fields": r["fields"],
-                        "masked": status_of(s)[key]["masked"],
-                        "message": f"已写入 {a['label']} 登录态（{r['count']} 个字段），下次采集生效"})
-        elif path == "/api/credentials/save":
-            """手动粘贴 Cookie / API Key。"""
-            key = (body.get("platform") or "").strip()
-            a = BY_KEY.get(key)
-            if not a or not a["setting"]:
-                self._json({"ok": False, "error": "该平台不需要凭据"}, 400)
-                return
-            s = load_settings()
-            val = str(body.get("value") or "").strip()
-            if val:
-                s[a["setting"]] = val
-            else:
-                s.pop(a["setting"], None)
-            save_settings(s)
-            self._json({"ok": True, "state": status_of(s)[key]["state"]})
-        elif path == "/api/credentials/clear":
-            key = (body.get("platform") or "").strip()
-            a = BY_KEY.get(key)
-            if not a or not a["setting"]:
-                self._json({"ok": False, "error": "该平台不需要凭据"}, 400)
-                return
-            s = load_settings()
-            s.pop(a["setting"], None)
-            save_settings(s)
-            self._json({"ok": True})
-        elif path == "/api/credentials/close":
-            r = browser_cdp.quit_browser()
-            self._json(r)
-        elif path == "/api/merge":
-            ids = body.get("task_ids") or []
-            name = (body.get("name") or "合并任务").strip()
-            if not ids:
-                self._json({"ok": False, "error": "请选择要合并的任务"}, 400)
-                return
-            tid = db.create_task(name, "merged", "", {"from": ids})
-            n = db.merge_task(tid, [int(i) for i in ids])
-            db.update_task(tid, status="done", total=n, finished_at=time.time(),
-                           message=f"合并 {n} 条", source_title=name)
-            self._json({"ok": True, "task_id": tid, "count": n})
-        else:
-            self._json({"ok": False, "error": "未知接口"}, 404)
+    _POST_ROUTES = [
+        (lambda p: p == '/api/tasks', _post_tasks),
+        (lambda p: p == '/api/watchlist', _post_watchlist),
+        (lambda p: p.startswith('/api/watchlist/') and p.endswith('/toggle'), _post_watchlist_toggle),
+        (lambda p: p.startswith('/api/watchlist/') and p.endswith('/remove'), _post_watchlist_remove),
+        (lambda p: p.startswith('/api/watchlist/') and p.endswith('/run'), _post_watchlist_run),
+        (lambda p: p == '/api/watch-alerts/read', _post_watch_alerts_read),
+        (lambda p: p == '/api/browser-capture', _post_browser_capture),
+        (lambda p: p == '/api/discover', _post_discover),
+        (lambda p: p == '/api/keyword-collect', _post_keyword_collect),
+        (lambda p: p.startswith('/api/tasks/') and p.endswith('/recollect'), _post_task_recollect),
+        (lambda p: p == '/api/preview', _post_preview),
+        (lambda p: p == '/api/import', _post_import),
+        (lambda p: p.startswith('/api/analyze/'), _post_analyze),
+        (lambda p: p == '/api/settings', _post_settings),
+        (lambda p: p == '/api/sentiment-memory', _post_sentiment_memory),
+        (lambda p: p == '/api/comment-sentiment', _post_comment_sentiment),
+        (lambda p: p == '/api/comment-memory/delete', _post_comment_memory_delete),
+        (lambda p: p == '/api/credentials/open', _post_credentials_open),
+        (lambda p: p == '/api/credentials/capture', _post_credentials_capture),
+        (lambda p: p == '/api/credentials/save', _post_credentials_save),
+        (lambda p: p == '/api/credentials/clear', _post_credentials_clear),
+        (lambda p: p == '/api/credentials/close', _post_credentials_close),
+        (lambda p: p == '/api/merge', _post_merge),
+    ]
 
 
 def _port_in_use(port: int) -> bool:
@@ -1142,6 +1298,130 @@ def _bind(port: int, tries: int = 20) -> tuple[ThreadingHTTPServer, int]:
     raise RuntimeError(f"端口 {port} ~ {port + tries - 1} 均无法绑定：{last}")
 
 
+# ---- 监测清单：定时增量盯梢 ----
+# 间隔以小时为单位，5 分钟巡检一次已经够密，再密只是空转。
+_WATCH_TICK_SECONDS = 300
+_WATCH_MAX_WAIT = 1800      # 单次采集最多等 30 分钟，卡住就放弃这一轮
+_WATCH_DEFAULT_LIMIT = 300  # 每轮每个来源抓多少条
+_WATCH_SCHEDULER_STARTED = False
+_watch_busy: set[int] = set()       # 正在跑的 watch id：上一轮没跑完就不排下一轮
+_WATCH_BUSY_LOCK = threading.Lock()
+
+
+def _watch_due(w: dict) -> bool:
+    """enabled 且（从没跑过 or 距上次跑已超过设定间隔）才算到期。"""
+    if not int(w.get("enabled") or 0):
+        return False
+    last = w.get("last_run")
+    if not last:
+        return True
+    try:
+        hours = int(w.get("interval_hours") or 24)
+    except (TypeError, ValueError):
+        hours = 24
+    return (time.time() - float(last)) >= hours * 3600
+
+
+def _alerts_from_result(result: dict) -> list[tuple[str, str, str]]:
+    """把分析结果里的预警摊平成 (level, title, detail)。
+
+    只留 high / medium：low 是「可控」、none 是没数据，报出来等于制造噪音，
+    预警中心的价值就在于「不用看也知道该点开哪条」。
+    """
+    a = (result or {}).get("alerts") or {}
+    level = str(a.get("level") or "none")
+    if level not in ("high", "medium"):
+        return []
+    items = a.get("items") or []
+    detail = "；".join(str(it.get("label") or "")
+                       for it in items[:3] if it.get("label"))
+    return [(level, str(a.get("headline") or "负面占比异常"), detail)]
+
+
+def _run_watch(w: dict) -> None:
+    """跑一次监测：增量采集 → 等跑完 → 分析 → 有预警就落库。
+
+    增量入库保证同一帖子不会被反复抓成重复数据；必须等采集结束再分析，
+    否则分析到的只是半截数据（多来源任务尤其明显）。
+    """
+    wid = int(w["id"])
+    try:
+        tid = start_collect((w.get("name") or w.get("url", ""))[:40], [w["url"]],
+                            limit=_WATCH_DEFAULT_LIMIT, sort="hot", incremental=True)
+    except Exception as exc:  # noqa: BLE001 - 起不来也要留痕，不能静默跳过
+        db.add_watch_alert(wid, None, "error", "采集启动失败",
+                           f"{type(exc).__name__}: {exc}")
+        return
+    waited, status = 0, "pending"
+    while waited < _WATCH_MAX_WAIT:
+        t = db.get_task(tid) or {}
+        status = t.get("status") or ""
+        if status not in ("running", "pending"):
+            break
+        time.sleep(5)
+        waited += 5
+    if status != "done":
+        db.add_watch_alert(wid, tid, "error", "采集未完成",
+                           f"任务状态 {status or '未知'}，这一轮跳过分析")
+        return
+    comments = db.get_comments(tid)
+    if not comments:
+        db.update_watch_run(wid)
+        return
+    try:
+        result = analyze(comments, {})
+        db.save_analysis(tid, {}, result)
+        # 存一份快照：前端的趋势迷你图和「历史」都靠它，没它就只能看到当前这一次
+        stats = result.get("stats") or {}
+        total = int(stats.get("total") or 0)
+        neg = int(stats.get("negative") or 0)
+        pos = int(stats.get("positive") or 0)
+        db.add_watch_snapshot(wid, tid, (neg / total) if total else 0.0,
+                              (pos / total) if total else 0.0, total)
+        for level, title, detail in _alerts_from_result(result):
+            db.add_watch_alert(wid, tid, level, title, detail)
+    except Exception as exc:  # noqa: BLE001
+        db.add_watch_alert(wid, tid, "error", "分析失败",
+                           f"{type(exc).__name__}: {exc}")
+    finally:
+        db.update_watch_run(wid)
+
+
+def _run_watch_guarded(w: dict) -> None:
+    """跑完一定把 busy 标记摘掉，否则这个监测项会永远不再被排到。"""
+    try:
+        _run_watch(w)
+    finally:
+        with _WATCH_BUSY_LOCK:
+            _watch_busy.discard(int(w["id"]))
+
+
+def _watch_scheduler_loop() -> None:
+    """后台巡检：到期的监测项各起一个线程跑。"""
+    while True:
+        try:
+            for w in db.list_watchlist():
+                wid = int(w["id"])
+                with _WATCH_BUSY_LOCK:
+                    if wid in _watch_busy or not _watch_due(w):
+                        continue
+                    _watch_busy.add(wid)
+                threading.Thread(target=_run_watch_guarded, args=(w,),
+                                 daemon=True).start()
+        except Exception:  # noqa: BLE001 - 巡检本身绝不能因一次异常停摆
+            pass
+        time.sleep(_WATCH_TICK_SECONDS)
+
+
+def start_watch_scheduler() -> None:
+    """启动监测调度。幂等：重复调用只会有一个巡检线程。"""
+    global _WATCH_SCHEDULER_STARTED
+    if _WATCH_SCHEDULER_STARTED:
+        return
+    _WATCH_SCHEDULER_STARTED = True
+    threading.Thread(target=_watch_scheduler_loop, daemon=True).start()
+
+
 def serve(open_browser: bool = True, port: int = PORT) -> None:
     # 双击启动时输出只留在黑窗口里，关掉就没了。复制一份进 logs/app.log，
     # 超 5MB 自动归档 —— 用户报「连不上/闪退」时至少有东西可查。
@@ -1168,6 +1448,14 @@ def serve(open_browser: bool = True, port: int = PORT) -> None:
     if got:
         before, after = got
         print(f"  已回收数据库碎片：{before / 1024 / 1024:.1f} MB → {after / 1024 / 1024:.1f} MB")
+    # 监测清单调度：到期的条目自动增量采集 + 分析 + 落预警
+    try:
+        start_watch_scheduler()
+        due = sum(1 for w in db.list_watchlist() if int(w.get("enabled") or 0))
+        if due:
+            print(f"  定时监测已开启：{due} 个条目在盯梢")
+    except Exception as exc:  # noqa: BLE001 - 调度起不来不该阻止服务启动
+        print(f"  [提示] 定时监测调度未启动：{type(exc).__name__}: {exc}")
     url = f"http://{HOST}:{port}/"
     print("=" * 56)
     print("  CommunityPulse 社区舆情雷达 已启动")

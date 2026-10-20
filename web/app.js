@@ -12,6 +12,125 @@ function toast(msg) {
 const esc = (s) => (s || '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const LBL = { positive: '正面', neutral: '中立', negative: '负面' };
 
+/* ---------- 工作台外壳：主题、屏切换、概览角标 ---------- */
+const THEME_KEY = 'communitypulse.theme';
+const VIEW_KEY = 'communitypulse.view';
+
+function curTheme() { return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; }
+function applyTheme() {
+  document.documentElement.dataset.theme = curTheme();
+  const t = $('#themeBtnText');
+  // 按钮显示「点下去会变成什么」，不是「现在是什么」
+  if (t) { t.textContent = curTheme() === 'dark' ? '浅色' : '深色'; }
+  // 图表颜色是初始化时写进 option 的，切主题必须整块重画才会跟着变
+  if (state.result) { try { render(); } catch (e) { /* 重画失败保持现状 */ } }
+}
+function initTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem(THEME_KEY); } catch (e) { /* 隐私模式下不可用 */ }
+  document.documentElement.dataset.theme = saved === 'light' ? 'light' : 'dark';
+  applyTheme();
+  const b = $('#themeBtn');
+  if (b) {
+    b.onclick = () => {
+      try { localStorage.setItem(THEME_KEY, curTheme() === 'dark' ? 'light' : 'dark'); } catch (e) { /* 同上 */ }
+      applyTheme();
+    };
+  }
+}
+
+/* ECharts 画在 canvas 上，CSS 变量传不进去，颜色得由 JS 按当前主题给。
+   集中成一个函数，避免十几处图表各写各的、切主题时漏改。 */
+function CH() {
+  return curTheme() === 'dark'
+    ? { line: '#2C3653', split: 'rgba(255,255,255,.07)', axis: '#8C99B0',
+        pos: '#4CC38A', neu: '#8C99B0', neg: '#FF6B6B', warn: '#F5B041',
+        brand: '#7C9BFF', area: 'rgba(124,155,255,.18)' }
+    : { line: '#DFE3E8', split: '#EEF1F5', axis: '#6A7178',
+        pos: '#4C9A5B', neu: '#9AA0A6', neg: '#D9534F', warn: '#E0A33E',
+        brand: '#3B6FD4', area: 'rgba(59,111,212,.12)' };
+}
+
+const VIEWS = {
+  overview: ['分析概览', '先看清现在有多少任务、哪些在报警，再决定下一步做什么。'],
+  collect: ['采集与导入', '贴链接批量采集，或者把评论直接粘进来。抖音 / 小红书走手动导入。'],
+  tasks: ['任务与对比', '采集进度、重采、删除，以及两个版本并排比口碑。'],
+  watch: ['监测与预警', '同一链接定时重采，负面率超线自动报警。'],
+  analyze: ['分析结果', '词条、相似句、吐槽点、情感、趋势、重点原句，以及三种导出。'],
+  settings: ['平台与设置', '各平台登录态、Steam 参数与大模型情感复核。'],
+};
+let curView = 'overview';
+
+function setTxt(sel, val) {
+  const el = $(sel);
+  if (el) { el.textContent = val; }
+}
+function fmtK(n) {
+  const v = Number(n) || 0;
+  return v >= 10000 ? (v / 10000).toFixed(v >= 100000 ? 0 : 1) + ' 万' : String(v);
+}
+function watchCount() { const el = $('#watchList'); return el ? el.querySelectorAll('.watch-item').length : 0; }
+function alertTotal() { const el = $('#alertList'); return el ? el.querySelectorAll('.alert-item').length : 0; }
+function alertUnread() { const el = $('#alertList'); return el ? el.querySelectorAll('.alert-item:not(.read)').length : 0; }
+
+/* 概览屏的 6 张 KPI、导航角标和顶栏上下文条，全部来自已经在页面上的 DOM
+   与 state，不额外发请求。 */
+function refreshShell() {
+  const ts = state.tasks || [];
+  const running = ts.filter((t) => t.status === 'running').length;
+  const comments = ts.reduce((n, t) => n + (t.total || 0), 0);
+  const sources = new Set(ts.map((t) => t.source_url || t.name || '')).size;
+  setTxt('#kpiTasks', String(ts.length));
+  setTxt('#kpiTasksFoot', ts.length ? `其中 ${ts.filter((t) => t.status === 'done').length} 个已完成` : '还没有采集过');
+  setTxt('#kpiRunning', String(running));
+  setTxt('#kpiRunningFoot', running ? '采集进行中，稍等会自动出结果' : '没有任务在跑');
+  setTxt('#kpiComments', fmtK(comments));
+  setTxt('#kpiCommentsFoot', `来自 ${sources} 个来源`);
+  const w = watchCount();
+  setTxt('#kpiWatch', String(w));
+  setTxt('#kpiWatchFoot', w ? `已产生 ${alertTotal()} 条预警` : '没有定时重采的链接');
+  const un = alertUnread();
+  setTxt('#kpiAlerts', String(un));
+  setTxt('#kpiAlertsFoot', un ? '点「监测与预警」查看' : (alertTotal() ? '预警都已读过' : '暂无预警'));
+  const st = state.result && state.result.stats;
+  setTxt('#kpiNeg', st ? (st.negative_rate * 100).toFixed(0) + '%' : '—');
+  setTxt('#kpiNegFoot', st ? `共 ${st.total} 条有效评论` : '分析过一个任务后出现');
+
+  const navT = $('#navTasks');
+  if (navT) { navT.textContent = String(ts.length); }
+  const navA = $('#navAlerts');
+  if (navA) {
+    navA.textContent = String(un);
+    navA.hidden = un === 0;
+  }
+  setTxt('#ctxPill', `${ts.length} 个任务 · ${fmtK(comments)} 条评论`
+    + (un ? ` · ${un} 条未读预警` : ''));
+}
+
+function gotoView(name, opts) {
+  const v = VIEWS[name] ? name : 'overview';
+  const keep = !!(opts && opts.keepScroll);
+  document.querySelectorAll('.view').forEach((el) => {
+    el.classList.toggle('on', el.dataset.view === v);
+  });
+  document.querySelectorAll('.nav-item').forEach((b) => {
+    const on = b.dataset.goto === v;
+    b.classList.toggle('on', on);
+    if (on) { b.setAttribute('aria-current', 'page'); } else { b.removeAttribute('aria-current'); }
+  });
+  setTxt('#viewTitle', VIEWS[v][0]);
+  setTxt('#viewSub', VIEWS[v][1]);
+  curView = v;
+  try { localStorage.setItem(VIEW_KEY, v); } catch (e) { /* 隐私模式 */ }
+  if (!keep) { window.scrollTo(0, 0); }
+  // 屏靠 display 切换，图表在隐藏时初始化宽度是 0；显形后必须补一次 resize
+  if (v === 'analyze' && _charts.length) {
+    requestAnimationFrame(() => {
+      _charts.forEach((c) => { try { c.resize(); } catch (e) { /* 同上 */ } });
+    });
+  }
+}
+
 async function api(path, opts) {
   const r = await fetch(path, opts);
   return await r.json();
@@ -75,6 +194,11 @@ function appPrompt(title, def = '', body = '') {
 
 /* ---------- 初始化 ---------- */
 async function init() {
+  initTheme();
+  // 导航项和概览屏的「下一步做什么」卡片共用一套 data-goto
+  document.querySelectorAll('.nav-item, .flowcard').forEach((b) => {
+    b.onclick = () => gotoView(b.dataset.goto);
+  });
   const h = await api('/api/health');
   $('#health').textContent = h.ok ? `服务正常${h.jieba ? '' : '（未装 jieba，使用内置分词）'}` : '服务异常';
   const p = await api('/api/platforms');
@@ -85,12 +209,18 @@ async function init() {
   setInterval(loadTasks, 2500);
   loadWatchlist();
   setInterval(loadWatchlist, 30000);
+  loadAlerts();
+  setInterval(loadAlerts, 30000);
 }
 
 async function loadTasks() {
   const r = await api('/api/tasks');
   const box = $('#taskList');
-  if (!r.items || !r.items.length) { box.innerHTML = '<span class="mut">暂无任务</span>'; return; }
+  // 先落到 state 再分支：原来空列表时提前 return，state.tasks 停在上一轮，
+  // 删掉最后一个任务后概览的「任务总数 / 评论总量」会一直不归零。
+  state.tasks = r.items || [];
+  refreshShell();
+  if (!state.tasks.length) { box.innerHTML = '<span class="mut">暂无任务</span>'; fillCompareSelects(); return; }
   box.innerHTML = r.items.map((t) => `
     <div class="task ${state.taskId === t.id ? 'active' : ''}" data-id="${t.id}"
          role="button" tabindex="0"
@@ -106,7 +236,6 @@ async function loadTasks() {
         <button class="sm" data-act="del" data-id="${t.id}">删除</button>
       </div>
     </div>`).join('');
-  state.tasks = r.items || [];
   fillCompareSelects();
   box.querySelectorAll('.task').forEach((el) => {
     el.onclick = (e) => {
@@ -180,7 +309,7 @@ $('#btnKeywordCollect').onclick = async () => {
     `<span class="mut">${v.author ? esc(v.author) + ' · ' : ''}播放 ${fmtNum(v.play)}` +
     `${v.reply ? ' · 评论 ' + fmtNum(v.reply) : ''}</span></span></div>`).join('');
   box.innerHTML = `<div class="ok-box">已创建任务 #${r.task_id}：抓取「${esc(kw)}」在 ${esc(r.platform)} 的 <b>热度前 ${r.video_limit}</b> 个来源，每个 ${r.comment_limit} 条评论</div>` +
-    `<div class="disc-list">${vids}</div><div class="mut">任务已在后台运行，下方任务列表可看实时进度。</div>`;
+    `<div class="disc-list">${vids}</div><div class="mut">任务已在后台运行，实时进度在「任务与对比」屏，采集完成后会自动分析。</div>`;
   loadTasks();
   watchAndAnalyze(r.task_id);
 };
@@ -278,6 +407,7 @@ $('#btnDiscover').onclick = async () => {
     $('#curTask').textContent = '已选任务 #' + c.task_id;
     toast(`已开始批量采集 ${urls.length} 个来源`);
     loadTasks();
+    gotoView('tasks');
   };
   $('#btnAppendDiscovered').onclick = () => {
     const urls = picked();
@@ -461,6 +591,8 @@ async function startBrowserCapture(url, platform) {
 }
 
 function watchAndAnalyze(id) {
+  // 采集是后台跑的，立刻把用户带到任务屏看实时进度；分析完成后由 runAnalyze 跳结果屏
+  gotoView('tasks');
   const timer = setInterval(async () => {
     const r = await api(`/api/tasks/${id}`);
     const t = r.task;
@@ -517,7 +649,11 @@ $('#btnCopyScript').onclick = async () => {
 
 /* ---------- 分析 ---------- */
 $('#btnAnalyze').onclick = () => {
-  if (!state.taskId) return toast('请先在左侧选中或采集一个任务');
+  if (!state.taskId) {
+    toast('还没有选中任务，先切到「任务与对比」屏点一张任务卡');
+    gotoView('tasks');
+    return;
+  }
   runAnalyze(state.taskId);
 };
 
@@ -538,11 +674,20 @@ async function runAnalyze(id, opts = {}) {
     if (!state.llmConfigured) toast('未配置 LLM 接口，本次将使用规则结果');
   }
   const btn = $('#btnAnalyze');
-  btn.disabled = true; btn.textContent = '排队中…';
-  let r = await api(`/api/analyze/${id}`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
+  btn.disabled = true; btn.textContent = '分析中…';
+  // 服务端 /api/analyze/<id> 是同步接口：一次 POST 直接回完整结果。
+  // 以前这里按「后台任务 + 轮询进度」写，去取一个后端从来没有的 job_id，
+  // 结果每次点分析都落到「分析启动失败」，界面上根本出不了结果。
+  let r;
+  try {
+    r = await api(`/api/analyze/${id}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  } catch (e) {
+    btn.disabled = false; btn.textContent = '分析选中任务';
+    return toast('分析请求失败：' + (e.message || e));
+  }
   // 采集还在进行：不静默按当前数据出结果，先说清楚代价再让用户决定
   if (!r.ok && r.code === 'collecting' && !opts.force) {
     const tgt = r.target ? ` / 目标 ${r.target} 条` : '';
@@ -553,41 +698,24 @@ async function runAnalyze(id, opts = {}) {
     if (!go) { btn.disabled = false; btn.textContent = '分析选中任务'; loadTasks(); return; }
     return runAnalyze(id, { force: true });
   }
-  if (!r.ok || !r.job_id) {
-    btn.disabled = false; btn.textContent = '分析选中任务';
-    return toast(r.error || r.message || '分析启动失败');
+  btn.disabled = false; btn.textContent = '分析选中任务';
+  if (!r.ok) return toast(r.error || '分析失败');
+
+  const res = r.result || {};
+  state.result = res;
+  state.taskId = id;
+  state.tab = 'kw';
+  // 先切屏再渲染：图表在隐藏容器里初始化宽度是 0，出来就是一片空白
+  gotoView('analyze');
+  render();
+  const s = res.stats || {};
+  if (s.task_total && s.raw_total && s.raw_total < s.task_total) {
+    toast(`分析完成：本次分析 ${s.raw_total} 条 / 任务共 ${s.task_total} 条（有效 ${s.total} 条）`);
+  } else if (s.sampled) {
+    toast(`分析完成：抽样分析 ${s.total} 条 / 去重后 ${s.pool_size} 条`);
+  } else {
+    toast('分析完成');
   }
-  // 分析改为后台任务：轮询进度，按钮实时显示阶段与百分比，不卡白屏
-  const timer = setInterval(async () => {
-    const j = await api('/api/analyze/job/' + r.job_id);
-    if (!j.ok) {
-      clearInterval(timer); btn.disabled = false; btn.textContent = '分析选中任务';
-      return toast(j.error || '查询分析进度失败');
-    }
-    if (j.status === 'pending' || j.status === 'running') {
-      const p = j.progress || {};
-      const pct = Math.round((p.fraction || 0) * 100);
-      btn.textContent = (p.stage || '分析中') + (pct ? ` ${pct}%` : '…');
-      return;
-    }
-    clearInterval(timer); btn.disabled = false; btn.textContent = '分析选中任务';
-    if (j.status === 'error') {
-      return toast('分析失败：' + (j.error || '未知错误'));
-    }
-    const res = j.result || {};
-    state.result = res;
-    state.taskId = id;
-    state.tab = 'kw';
-    render();
-    const s = res.stats || {};
-    if (s.task_total && s.raw_total && s.raw_total < s.task_total) {
-      toast(`分析完成：本次分析 ${s.raw_total} 条 / 任务共 ${s.task_total} 条（有效 ${s.total} 条）`);
-    } else if (s.sampled) {
-      toast(`分析完成：抽样分析 ${s.total} 条 / 去重后 ${s.pool_size} 条`);
-    } else {
-      toast('分析完成');
-    }
-  }, 1500);
 }
 
 /* ---------- 监测清单 ---------- */
@@ -603,7 +731,7 @@ function watchRowHtml(w) {
       <span class="chip ${w.enabled ? 'stable' : 'manual'}">${en}</span>
     </div>
     <div class="watch-url" title="${esc(w.url || '')}">${esc(w.url || '')}</div>
-    <div class="watch-meta">间隔 ${w.interval_hours}h · 最新 负 ${negPct} / 正 ${posPct} · 快照 ${w.snapshots} 次${w.running ? ' · <b style="color:#e0a800">进行中</b>' : ''}</div>
+    <div class="watch-meta">间隔 ${w.interval_hours}h · 最新 负 ${negPct} / 正 ${posPct} · 快照 ${w.snapshots} 次${w.running ? ' · <b class="live">进行中</b>' : ''}</div>
     <div class="watch-actions">
       <button class="sm" data-act="wrun" data-id="${w.id}">${runTxt}</button>
       <button class="sm" data-act="wtoggle" data-id="${w.id}">${w.enabled ? '暂停' : '启用'}</button>
@@ -618,18 +746,18 @@ function sparkline(pts) {
   const w = 240, h = 40;
   const step = pts.length > 1 ? w / (pts.length - 1) : 0;
   const coords = pts.map((p, i) => `${(i * step).toFixed(1)},${(h - (p.v || 0) * h).toFixed(1)}`).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="background:#0f1320;border-radius:6px;margin-top:6px">
-    <polyline points="${coords}" fill="none" stroke="#d9534f" stroke-width="1.5"/></svg>`;
+  // 颜色和底色交给 CSS 变量，写死的话切浅色主题会留一块黑底
+  return `<svg class="spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" role="img" aria-label="负面率走势">
+    <polyline points="${coords}" fill="none" stroke-width="1.5"/></svg>`;
 }
 
 async function loadWatchlist() {
   const r = await api('/api/watchlist');
   const box = $('#watchList');
-  if (!r.ok || !r.items || !r.items.length) {
-    box.innerHTML = '<span class="mut">暂无监测项</span>';
-    return;
-  }
-  box.innerHTML = r.items.map(watchRowHtml).join('');
+  box.innerHTML = (r.ok && r.items && r.items.length)
+    ? r.items.map(watchRowHtml).join('')
+    : '<span class="mut">暂无监测项</span>';
+  refreshShell();
 }
 
 async function showWatchHistory(wid) {
@@ -682,6 +810,77 @@ $('#watchList').onclick = async (e) => {
   } else if (act === 'whist') {
     await showWatchHistory(id);
   }
+};
+
+/* ---------- 预警中心 ----------
+   预警是定时监测跑出来的，不一定对应当前正在看的任务，
+   所以单独摆一页：不重跑分析也能一眼看到「现在哪些在报警」。 */
+let alertUnreadOnly = false;
+
+const ALERT_LV = { high: '高危', medium: '关注', warn: '提醒', info: '提示' };
+
+function fmtTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function loadAlerts() {
+  const box = $('#alertList');
+  if (!box) return;
+  try {
+    const r = await api('/api/watch-alerts?limit=100'
+      + (alertUnreadOnly ? '&unread=1' : ''));
+    const cnt = $('#alertCount');
+    if (cnt) {
+      cnt.textContent = r.unread ? `未读 ${r.unread} 条` : '全部已读';
+    }
+    if (!r.items || !r.items.length) {
+      box.innerHTML = '<span class="mut">'
+        + (alertUnreadOnly ? '没有未读预警' : '暂无预警') + '</span>';
+    } else {
+      box.innerHTML = r.items.map((a) => `
+        <div class="alert-item ${esc(a.level || 'warn')}${a.is_read ? ' read' : ''}" data-id="${a.id}">
+          <div class="alert-head">
+            <div><span class="alert-lv">${esc(ALERT_LV[a.level] || '提醒')}</span><b>${esc(a.title)}</b></div>
+            <span class="alert-time">${fmtTime(a.created_at)}</span>
+          </div>
+          ${a.detail ? `<div class="alert-detail">${esc(a.detail)}</div>` : ''}
+        </div>`).join('');
+    }
+  } catch (e) {
+    box.innerHTML = '<span class="mut">预警加载失败</span>';
+  }
+  // 导航角标与概览的「未读预警」都数这段 DOM，两个分支都要刷
+  refreshShell();
+}
+
+$('#alertList').onclick = async (e) => {
+  // 点单条就是「我看到了」——标已读，比再做一个按钮好点
+  const it = e.target.closest('.alert-item');
+  if (!it || it.classList.contains('read')) return;
+  await api('/api/watch-alerts/read', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids: [+it.dataset.id] }),
+  });
+  loadAlerts();
+};
+
+$('#btnAlertUnread').onclick = () => {
+  alertUnreadOnly = !alertUnreadOnly;
+  $('#btnAlertUnread').textContent = alertUnreadOnly ? '看全部' : '只看未读';
+  $('#btnAlertUnread').classList.toggle('primary', alertUnreadOnly);
+  loadAlerts();
+};
+
+$('#btnAlertReadAll').onclick = async () => {
+  const r = await api('/api/watch-alerts/read', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({}),
+  });
+  toast(r.ok ? `已标记 ${r.updated} 条已读` : '标记失败');
+  loadAlerts();
 };
 
 /* ---------- 版本对比 ---------- */
@@ -760,6 +959,7 @@ window.addEventListener('resize', () => {
 
 function render() {
   _disposeCharts();
+  refreshShell();
   const d = state.result;
   if (!d || !d.stats || !d.stats.total) {
     $('#result').innerHTML = '<div class="empty">' + esc((d && d.error) || '暂无分析结果') + '</div>';
@@ -774,7 +974,7 @@ function render() {
     <div class="kpis">
       <div class="kpi"><b>${s.total}</b><span>${cut ? '本次有效评论' : '有效评论'}</span></div>
       <div class="kpi"><b>${(s.positive_rate * 100).toFixed(0)}%</b><span>好评率</span></div>
-      <div class="kpi"><b style="color:#d9534f">${(s.negative_rate * 100).toFixed(0)}%</b><span>差评率</span></div>
+      <div class="kpi"><b>${(s.negative_rate * 100).toFixed(0)}%</b><span>差评率</span></div>
       <div class="kpi"><b>${(d.clusters || []).length}</b><span>相似句族群</span></div>
       <div class="kpi"><b>${(d.topics || []).length}</b><span>吐槽点类别</span></div>
     </div>`;
@@ -922,16 +1122,17 @@ function tabKeywords(body, d) {
   const chart = echarts.init(document.getElementById('kwChart'));
   _charts.push(chart);
   const data = top.slice(0, 20);
+  const C = CH();
   chart.setOption({
     grid: { left: 90, right: 50, top: 10, bottom: 20 },
     tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
-    xAxis: { type: 'value', splitLine: { lineStyle: { color: '#eef1f5' } } },
+    xAxis: { type: 'value', splitLine: { lineStyle: { color: C.split } } },
     yAxis: { type: 'category', data: data.map((k) => k.word).reverse(),
-      axisLine: { lineStyle: { color: '#dfe3e8' } }, axisLabel: { color: '#5b636b' } },
+      axisLine: { lineStyle: { color: C.line } }, axisLabel: { color: C.axis } },
     series: [{
       type: 'bar', data: data.map((k) => k.docs).reverse(), barMaxWidth: 16,
-      itemStyle: { color: '#3b6fd4', borderRadius: [0, 4, 4, 0] },
-      label: { show: true, position: 'right', color: '#8b9299', fontSize: 11 },
+      itemStyle: { color: C.brand, borderRadius: [0, 4, 4, 0] },
+      label: { show: true, position: 'right', color: C.axis, fontSize: 11 },
     }],
   });
   state.charts.kw = chart;
@@ -1015,19 +1216,20 @@ function tabTopics(body, d) {
     </div>`).join('')}`;
   const chart = echarts.init(document.getElementById('tpChart'));
   _charts.push(chart);
+  const C = CH();
   chart.setOption({
     grid: { left: 110, right: 60, top: 10, bottom: 20 },
     tooltip: { trigger: 'axis' },
-    xAxis: { type: 'value', splitLine: { lineStyle: { color: '#eef1f5' } } },
-    yAxis: { type: 'category', data: ts.map((t) => t.topic).reverse(), axisLabel: { color: '#5b636b' } },
+    xAxis: { type: 'value', splitLine: { lineStyle: { color: C.split } } },
+    yAxis: { type: 'category', data: ts.map((t) => t.topic).reverse(), axisLabel: { color: C.axis } },
     series: [{
       type: 'bar', data: ts.map((t) => t.count).reverse(), barMaxWidth: 16,
       itemStyle: {
         borderRadius: [0, 4, 4, 0],
-        color: (p) => ['#4c9a5b', '#e0a33e', '#d9534f'][
+        color: (p) => [C.pos, C.warn, C.neg][
           ts.slice().reverse()[p.dataIndex].neg_rate > 0.5 ? 2 : ts.slice().reverse()[p.dataIndex].neg_rate > 0.25 ? 1 : 0],
       },
-      label: { show: true, position: 'right', color: '#8b9299', fontSize: 11 },
+      label: { show: true, position: 'right', color: C.axis, fontSize: 11 },
     }],
   });
   state.charts.tp = chart;
@@ -1051,16 +1253,17 @@ function tabSentiment(body, d) {
     </div>`;
   const chart = echarts.init(document.getElementById('stChart'));
   _charts.push(chart);
+  const C = CH();
   chart.setOption({
     tooltip: { trigger: 'item' },
-    legend: { bottom: 0, textStyle: { color: '#5b636b' } },
+    legend: { bottom: 0, textStyle: { color: C.axis } },
     series: [{
       type: 'pie', radius: ['42%', '68%'], center: ['50%', '45%'],
-      label: { formatter: '{b} {c} ({d}%)', color: '#5b636b' },
+      label: { formatter: '{b} {c} ({d}%)', color: C.axis },
       data: [
-        { name: '正面', value: s.positive, itemStyle: { color: '#4c9a5b' } },
-        { name: '中立', value: s.neutral, itemStyle: { color: '#9aa0a6' } },
-        { name: '负面', value: s.negative, itemStyle: { color: '#d9534f' } },
+        { name: '正面', value: s.positive, itemStyle: { color: C.pos } },
+        { name: '中立', value: s.neutral, itemStyle: { color: C.neu } },
+        { name: '负面', value: s.negative, itemStyle: { color: C.neg } },
       ],
     }],
   });
@@ -1077,20 +1280,23 @@ function tabTrend(body, d) {
   body.innerHTML = '<div id="trChart" class="chart" role="img" aria-label="声量趋势图，横轴为时间，纵轴为评论数"></div>';
   const chart = echarts.init(document.getElementById('trChart'));
   _charts.push(chart);
+  const C = CH();
   chart.setOption({
     tooltip: { trigger: 'axis' },
-    legend: { bottom: 0, textStyle: { color: '#5b636b' } },
+    legend: { bottom: 0, textStyle: { color: C.axis } },
     grid: { left: 50, right: 60, top: 20, bottom: 40 },
-    xAxis: { type: 'category', data: tr.points.map((p) => p.date), axisLabel: { color: '#5b636b' } },
+    xAxis: { type: 'category', data: tr.points.map((p) => p.date), axisLabel: { color: C.axis } },
     yAxis: [
-      { type: 'value', name: '声量', splitLine: { lineStyle: { color: '#eef1f5' } } },
-      { type: 'value', name: '负面率', axisLabel: { formatter: '{value}%', color: '#5b636b' }, splitLine: { show: false } },
+      { type: 'value', name: '声量', nameTextStyle: { color: C.axis },
+        axisLabel: { color: C.axis }, splitLine: { lineStyle: { color: C.split } } },
+      { type: 'value', name: '负面率', nameTextStyle: { color: C.axis },
+        axisLabel: { formatter: '{value}%', color: C.axis }, splitLine: { show: false } },
     ],
     series: [
       { name: '评论数', type: 'line', smooth: true, data: tr.points.map((p) => p.count),
-        itemStyle: { color: '#3b6fd4' }, areaStyle: { color: 'rgba(59,111,212,.12)' } },
+        itemStyle: { color: C.brand }, areaStyle: { color: C.area } },
       { name: '负面率', type: 'line', yAxisIndex: 1, smooth: true,
-        data: tr.points.map((p) => +(p.neg_rate * 100).toFixed(1)), itemStyle: { color: '#d9534f' } },
+        data: tr.points.map((p) => +(p.neg_rate * 100).toFixed(1)), itemStyle: { color: C.neg } },
     ],
   });
   state.charts.tr = chart;
@@ -1185,7 +1391,7 @@ function renderCm() {
 
 async function tabComments(body, d) {
   const tid = state.taskId;
-  if (!tid) { body.innerHTML = '<div class="empty">请先在左侧选中一个任务</div>'; return; }
+  if (!tid) { body.innerHTML = '<div class="empty">还没有选中任务，到「任务与对比」屏点一张任务卡</div>'; return; }
   state.cm.body = body;
   if (state.cm.tid !== tid) {
     await loadComments(true);
@@ -1352,6 +1558,10 @@ $('#btnSaveSet').onclick = async () => {
 
 loadSettings();
 init();
+
+// 上次停在哪个屏，重新打开还在哪个屏（keepScroll：刚进来不该抢滚动位置）
+try { gotoView(localStorage.getItem(VIEW_KEY) || 'overview', { keepScroll: true }); }
+catch (e) { gotoView('overview'); }
 
 // 链接文本框：实时显示识别到的链接数量，并自动撑高
 (function bindUrlBox() {

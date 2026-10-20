@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -7,292 +7,439 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<header>
-  <h1>CommunityPulse</h1>
-  <span class="sub">社区舆情雷达 · 评论采集 / 词条统计 / 相似句聚类 / 情感与吐槽点分析</span>
-  <span class="spacer"></span>
-  <span class="sub" id="health" aria-live="polite">连接中…</span>
-</header>
+<div class="shell">
 
-<main class="layout">
-  <!-- 左栏 -->
-  <div aria-label="采集与设置">
-    <div class="side-tabs" role="tablist">
-      <button data-tab="collect" class="active" type="button">采集</button>
-      <button data-tab="task" type="button">任务</button>
-      <button data-tab="setting" type="button">设置</button>
-    </div>
-    <div class="panel" data-group="collect">
-      <h2>新建采集 <span class="tip">粘贴链接即可</span></h2>
-      <label for="url">社区链接（每行一个，可一次填多个来源批量采集）</label>
-      <textarea id="url" rows="5" placeholder="https://www.bilibili.com/video/BV...&#10;https://weibo.com/detail/xxxx"></textarea>
-      <div class="mut" id="urlCount" aria-live="polite" style="margin-top:4px;color:var(--brand)">尚未识别到链接</div>
-      <div class="row" style="margin-top:10px">
-        <div>
-          <label for="name">任务名称（可选）</label>
-          <input type="text" id="name" placeholder="如：2.3版本 更新反馈">
-        </div>
-        <div style="max-width:120px">
-          <label for="limit">目标条数</label>
-          <input type="number" id="limit" value="300" min="10" max="20000">
-        </div>
-      </div>
-      <label for="sortMode">排序方式（决定取哪些评论）</label>
-      <select id="sortMode">
-        <option value="hot">按热度排序，取前 N 条（推荐）</option>
-        <option value="new">按时间排序，取最新 N 条</option>
-        <option value="both">热度 + 最新两路合并，尽量凑够 N 条</option>
-      </select>
-      <div class="row" style="margin-top:12px">
-        <button id="btnPreview" class="ghost">先试抓（不入库）</button>
-        <button id="btnCollect" class="primary">开始采集</button>
-      </div>
-      <div class="mut" style="margin-top:6px">试抓会用同样的条数和排序真跑一遍，用来确认到底能抓到多少条。</div>
-      <div id="previewBox"></div>
+  <!-- ================= 左侧导航 =================
+       原来左栏 400px 里堆 9 个面板，靠三个页签分组，找东西还是靠记忆；
+       现在收成六屏导航，一屏一件事，导航上直接带任务数与未读预警角标。 -->
+  <aside class="rail">
+    <div class="rail-brand">
+      <span class="mark" aria-hidden="true">CP</span>
+      <span class="brandbox">
+        <b>CommunityPulse</b>
+        <i>社区舆情雷达</i>
+      </span>
     </div>
 
-    <div class="panel" data-group="collect">
-      <h2>关键词发现 <span class="tip">不知道盯哪些帖子时用</span></h2>
-      <label for="kw">搜索关键词（如游戏名、版本名）</label>
-      <div class="row">
-        <input type="text" id="kw" placeholder="如：原神 卡顿">
-        <button id="btnDiscover" class="ghost" style="max-width:96px">搜索</button>
-      </div>
-      <div class="row row-plat" style="margin-top:8px">
-        <select id="kwPlatform" aria-label="选择平台">
-          <option value="bilibili">B站（匿名可用）</option>
-          <option value="weibo">微博（需登录）</option>
-          <option value="tieba">百度贴吧（需登录）</option>
-          <option value="nga">NGA 论坛（可匿名）</option>
-          <option value="taptap">TapTap（浏览器助手）</option>
-          <option value="douyin">抖音（浏览器助手）</option>
-          <option value="xiaohongshu">小红书（浏览器助手）</option>
-          <option value="reddit">Reddit（海外）</option>
-          <option value="steam">Steam（搜索常不可达）</option>
-        </select>
-        <select id="kwSort" class="auto" aria-label="排序方式">
-          <option value="hot">按热度</option>
-          <option value="new">按最新</option>
-        </select>
-        <select id="kwLimit" class="auto" aria-label="结果条数">
-          <option value="10">10 条</option>
-          <option value="20" selected>20 条</option>
-          <option value="30">30 条</option>
-        </select>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <div style="max-width:150px">
-          <label for="kwTopN">热度前 N 个来源</label>
-          <select id="kwTopN">
-            <option value="3">前 3 个</option>
-            <option value="5" selected>前 5 个</option>
-            <option value="10">前 10 个</option>
-            <option value="20">前 20 个</option>
-          </select>
-        </div>
-        <div style="max-width:150px">
-          <label for="kwComments">每个来源评论数</label>
-          <input type="number" id="kwComments" value="300" min="10" max="20000">
-        </div>
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button id="btnKeywordCollect" class="primary">搜索并采集（热度前 N）</button>
-        <button id="btnDiscoverOnly" class="ghost">仅搜索（手动勾选）</button>
-      </div>
-      <div id="discoverBox" class="mut" style="margin-top:8px">输入关键词后点「搜索并采集」可一键抓取热度前 N 个来源的评论；或点「仅搜索」手动勾选。抖音/小红书走浏览器助手，会在已登录浏览器里搜索并逐条抓评论。</div>
-    </div>
+    <nav class="nav" aria-label="工作台导航">
+      <div class="nav-grp">总览</div>
+      <button class="nav-item" data-goto="overview" type="button">
+        <svg class="ni" viewBox="0 0 16 16" aria-hidden="true"><path d="M2 9.5 8 3l6 6.5M3.5 8.5V13h9V8.5"/></svg>
+        <span>分析概览</span>
+      </button>
 
-    <div class="panel" data-group="collect">
-      <h2>平台支持情况 <span class="tip">悬停查看说明</span></h2>
-      <div class="plat-list" id="platList"><span class="mut">加载中…</span></div>
-      <div class="mut" style="margin-top:8px">
-        <span class="chip stable">稳定接口</span>
-        <span class="chip best-effort">网页解析</span>
-        <span class="chip restricted">风控受限</span>
-        <span class="chip manual">需手动导入</span>
-      </div>
-    </div>
+      <div class="nav-grp">数据接入</div>
+      <button class="nav-item" data-goto="collect" type="button">
+        <svg class="ni" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5v8M5 8l3 3 3-3M2.5 13h11"/></svg>
+        <span>采集与导入</span>
+      </button>
+      <button class="nav-item" data-goto="tasks" type="button">
+        <svg class="ni" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 8h10M3 12.5h7"/></svg>
+        <span>任务与对比</span>
+        <em class="nbadge" id="navTasks">0</em>
+      </button>
+      <button class="nav-item" data-goto="watch" type="button">
+        <svg class="ni" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2.5 13.5 12h-11z"/><path d="M8 6.5v2.8M8 10.6v.6"/></svg>
+        <span>监测与预警</span>
+        <em class="nbadge warn" id="navAlerts" hidden>0</em>
+      </button>
 
-    <div class="panel" data-group="collect">
-      <h2>手动导入 <span class="tip">抖音 / 小红书 等走这里</span></h2>
-      <label for="impText">粘贴评论（一行一条）或 CSV / JSON 内容</label>
-      <textarea id="impText" placeholder="玩家A：这版本优化太差了&#10;玩家B：抽卡爆率一如既往的感人"></textarea>
-      <div class="row" style="margin-top:8px">
-        <select id="impFmt" aria-label="导入格式">
-          <option value="auto">自动识别</option>
-          <option value="text">纯文本（一行一条）</option>
-          <option value="csv">CSV</option>
-          <option value="json">JSON</option>
-        </select>
-        <button id="btnImport" style="max-width:120px">导入</button>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button id="btnCopyScript" class="ghost">复制浏览器采集脚本（抖音 / 小红书）</button>
-      </div>
-      <div id="scriptTip" class="mut" style="margin-top:6px;font-size:12px;line-height:1.6">
-        抖音 / 小红书 有签名风控，服务端抓不到。用这个脚本在你的浏览器里跑：<br>
-        打开视频/笔记页 → 按 F12 → 切到 Console → 粘贴脚本回车 → 自动滚动抓完并下载 JSON → 拖到上面的文本框导入。
-      </div>
-    </div>
+      <div class="nav-grp">分析产出</div>
+      <button class="nav-item" data-goto="analyze" type="button">
+        <svg class="ni" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 12.5h10M4.5 12V7M8 12V3.5M11.5 12V8.5"/></svg>
+        <span>分析结果</span>
+      </button>
+      <button class="nav-item" data-goto="settings" type="button">
+        <svg class="ni" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.6"/><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1"/></svg>
+        <span>平台与设置</span>
+      </button>
+    </nav>
 
-    <div class="panel" data-group="task">
-      <h2>任务列表</h2>
-      <div class="task-list" id="taskList"><span class="mut">暂无任务</span></div>
+    <div class="rail-foot">
+      <button id="themeBtn" class="ghost sm" type="button"><span id="themeBtnText">浅色</span>主题</button>
+      <div class="rail-tip">数据与登录态只留在本机 <code>data\</code>，不上传任何地方。</div>
     </div>
+  </aside>
 
-    <div class="panel" data-group="task">
-      <h2>监测清单 <span class="tip">定时重采同一链接，盯口碑走势</span></h2>
-      <label for="watchName">监测名称</label>
-      <input type="text" id="watchName" placeholder="如：2.3版本 官方公告帖">
-      <label for="watchUrl">社区链接（帖子 / 视频页，需服务端可直连的平台）</label>
-      <input type="text" id="watchUrl" placeholder="https://www.bilibili.com/video/BV...">
-      <div class="row" style="margin-top:8px">
-        <div style="max-width:170px">
-          <label for="watchInterval">重采间隔（小时）</label>
-          <input type="number" id="watchInterval" value="24" min="1" max="720">
-        </div>
-        <button id="btnAddWatch" class="primary" style="align-self:flex-end">添加并监测</button>
+  <!-- ================= 右侧舞台 ================= -->
+  <div class="stage">
+    <header class="topbar">
+      <div class="tb-left">
+        <h1 class="tb-title" id="viewTitle">分析概览</h1>
+        <p class="tb-sub" id="viewSub">先看清现在有多少任务、哪些在报警，再决定下一步做什么。</p>
       </div>
-      <div class="mut" style="margin-top:6px">服务启动后每 60s 检查一次到点的监测项，自动增量重采并分析，记录声量与正负向占比走势。抖音 / 小红书等浏览器助手类平台暂不支持自动重采。</div>
-      <div id="watchList" class="watch-list"><span class="mut">暂无监测项</span></div>
-    </div>
+      <span class="spacer"></span>
+      <span class="ctx" id="ctxPill">连接中…</span>
+      <span class="sub" id="health" aria-live="polite">连接中…</span>
+    </header>
 
-    <div class="panel" data-group="setting">
-      <h2>平台接入 <span class="tip">点登录 → 一键获取，就能抓完整评论区</span></h2>
-      <div id="credList" class="cred-list"><span class="mut">加载中…</span></div>
-      <div class="row">
-        <div>
-          <label for="setSteamLang">Steam 语言</label>
-          <select id="setSteamLang">
-            <option value="all">全部语言</option>
-            <option value="schinese">简体中文</option>
-            <option value="english">英文</option>
-          </select>
-        </div>
-        <div>
-          <label for="setSteamDays">Steam 时间范围(天)</label>
-          <input type="number" id="setSteamDays" value="365" min="1" max="3650">
-        </div>
-      </div>
-      <div class="row row-3btn" style="margin-top:10px">
-        <button id="btnSaveSet" class="primary">保存其他设置</button>
-        <button id="btnReloadSet" class="ghost">刷新状态</button>
-        <button id="btnCloseBrowser" class="ghost">关闭登录浏览器</button>
-      </div>
-      <div class="mut" style="margin-top:6px">
-        凭据只保存在本机 <code>data\settings.json</code>，不会上传到任何地方。<br>
-        「一键获取」需要本机装有 Chrome / Edge：会开一个带调试端口的浏览器窗口，你登录后它把 Cookie 读回来，
-        不会保存你的密码。
-      </div>
-    </div>
+    <main class="views">
 
-    <div class="panel" data-group="setting">
-      <h2>大模型情感增强 <span class="tip">可选 · 提升反讽/阴阳怪气识别</span></h2>
-      <label for="llmEndpoint">OpenAI 兼容接口地址</label>
-      <input type="text" id="llmEndpoint" placeholder="https://api.openai.com/v1">
-      <label for="llmKey">API Key</label>
-      <input type="password" id="llmKey" placeholder="sk-...">
-      <div class="row" style="margin-top:8px">
-        <div style="max-width:200px">
-          <label for="llmModel">模型名</label>
-          <input type="text" id="llmModel" placeholder="gpt-4o-mini">
+      <!-- ---------- 概览 ---------- -->
+      <section class="view on" data-view="overview" aria-label="分析概览">
+        <div class="kpigrid">
+          <div class="kpi k-total">
+            <span class="k-lbl">任务总数</span><b class="k-val" id="kpiTasks">0</b>
+            <span class="k-foot" id="kpiTasksFoot">还没有采集过</span>
+          </div>
+          <div class="kpi k-run">
+            <span class="k-lbl">进行中</span><b class="k-val" id="kpiRunning">0</b>
+            <span class="k-foot" id="kpiRunningFoot">没有任务在跑</span>
+          </div>
+          <div class="kpi k-comment">
+            <span class="k-lbl">评论总量</span><b class="k-val" id="kpiComments">0</b>
+            <span class="k-foot" id="kpiCommentsFoot">来自 0 个来源</span>
+          </div>
+          <div class="kpi k-watch">
+            <span class="k-lbl">监测项</span><b class="k-val" id="kpiWatch">0</b>
+            <span class="k-foot" id="kpiWatchFoot">没有定时重采的链接</span>
+          </div>
+          <div class="kpi k-alert">
+            <span class="k-lbl">未读预警</span><b class="k-val" id="kpiAlerts">0</b>
+            <span class="k-foot" id="kpiAlertsFoot">暂无预警</span>
+          </div>
+          <div class="kpi k-neg">
+            <span class="k-lbl">最近负面率</span><b class="k-val" id="kpiNeg">—</b>
+            <span class="k-foot" id="kpiNegFoot">分析过一个任务后出现</span>
+          </div>
         </div>
-        <div style="max-width:160px">
-          <label for="llmCap">抽检上限（条）</label>
-          <input type="number" id="llmCap" value="200" min="10" max="2000" step="10">
-        </div>
-      </div>
-      <div class="mut" style="margin-top:6px">填好后在「分析设置」里勾选「启用 LLM 情感复核」即可。规则打底、LLM 复核高赞与易误判评论，接口不通时自动降级为规则结果。</div>
-    </div>
 
-    <div class="panel" data-group="setting">
-      <h2>版本对比 <span class="tip">两个任务并排看口碑变化</span></h2>
-      <div class="row">
-        <div style="flex:1">
-          <label for="cmpA">任务 A（基线）</label>
-          <select id="cmpA"><option value="">选择任务…</option></select>
+        <section class="panel">
+          <h2>下一步做什么</h2>
+          <div class="flowgrid">
+            <button class="flowcard" data-goto="collect" type="button">
+              <b>贴链接采集</b><i>粘贴 B站 / 微博 / Steam 链接，或把评论粘进来</i>
+            </button>
+            <button class="flowcard" data-goto="collect" type="button">
+              <b>关键词找来源</b><i>不知道盯哪些帖子时，先按游戏名搜一圈再批量采</i>
+            </button>
+            <button class="flowcard" data-goto="tasks" type="button">
+              <b>看任务进度</b><i>采集状态、重采、删除都在这里</i>
+            </button>
+            <button class="flowcard" data-goto="analyze" type="button">
+              <b>分析选中任务</b><i>词条、相似句、吐槽点、情感、趋势、原句</i>
+            </button>
+            <button class="flowcard" data-goto="watch" type="button">
+              <b>盯口碑走势</b><i>同一链接定时重采，超线自动报警</i>
+            </button>
+            <button class="flowcard" data-goto="settings" type="button">
+              <b>补登录态</b><i>微博 / 贴吧 / TapTap 填 Cookie 后能拿到更完整评论</i>
+            </button>
+          </div>
+        </section>
+
+        <div class="duo">
+          <section class="panel">
+            <h2>能用它做什么</h2>
+            <ul class="infolist">
+              <li>高频词条与新词黑话：TF-IDF 加权词频，自动识别「吃保底」「沉船」这类新梗。</li>
+              <li>相似句聚类：用词不同但诉求相同的反馈归成一族，给代表句和族内样本。</li>
+              <li>吐槽点归类：性能、商业化、玩法平衡、剧情美术、内容更新等九类。</li>
+              <li>声量趋势与重点原句：高赞、高频诉求、强烈负面，可直接引用给研发。</li>
+              <li>导出 Excel / CSV / 单文件 HTML 报告，报告可直接发给别人看。</li>
+            </ul>
+          </section>
+          <section class="panel">
+            <h2>数据放在哪里 <span class="tip">本机，不出门</span></h2>
+            <ul class="infolist">
+              <li>评论与分析结果存在 <code>data\pulse.db</code>，导出的文件在 <code>data\</code> 下。</li>
+              <li>Cookie 与 API Key 用 Windows DPAPI 加密后写进 <code>data\settings.json</code>，拷到别的机器解不开。</li>
+              <li>打包分发时默认排除 <code>data\</code>，发出去的压缩包里不含你的登录信息。</li>
+              <li>服务日志在 <code>logs\app.log</code>，超过 5MB 自动归档保留 3 份。</li>
+            </ul>
+          </section>
         </div>
-        <div style="flex:1">
-          <label for="cmpB">任务 B（对比）</label>
-          <select id="cmpB"><option value="">选择任务…</option></select>
+      </section>
+
+      <!-- ---------- 采集与导入 ---------- -->
+      <section class="view" data-view="collect" aria-label="采集与导入">
+        <div class="vgrid">
+          <section class="panel">
+            <h2>新建采集 <span class="tip">粘贴链接即可</span></h2>
+            <label for="url">社区链接（每行一个，可一次填多个来源批量采集）</label>
+            <textarea id="url" rows="5" placeholder="https://www.bilibili.com/video/BV...&#10;https://weibo.com/detail/xxxx"></textarea>
+            <div class="mut accent" id="urlCount" aria-live="polite">尚未识别到链接</div>
+            <div class="row">
+              <div>
+                <label for="name">任务名称（可选）</label>
+                <input type="text" id="name" placeholder="如：2.3版本 更新反馈">
+              </div>
+              <div class="narrow">
+                <label for="limit">目标条数</label>
+                <input type="number" id="limit" value="300" min="10" max="20000">
+              </div>
+            </div>
+            <label for="sortMode">排序方式（决定取哪些评论）</label>
+            <select id="sortMode">
+              <option value="hot">按热度排序，取前 N 条（推荐）</option>
+              <option value="new">按时间排序，取最新 N 条</option>
+              <option value="both">热度 + 最新两路合并，尽量凑够 N 条</option>
+            </select>
+            <div class="row">
+              <button id="btnPreview" class="ghost">先试抓（不入库）</button>
+              <button id="btnCollect" class="primary">开始采集</button>
+            </div>
+            <div class="mut">试抓会用同样的条数和排序真跑一遍，用来确认到底能抓到多少条。</div>
+            <div id="previewBox"></div>
+          </section>
+
+          <section class="panel">
+            <h2>关键词发现 <span class="tip">不知道盯哪些帖子时用</span></h2>
+            <label for="kw">搜索关键词（如游戏名、版本名）</label>
+            <div class="row">
+              <input type="text" id="kw" placeholder="如：原神 卡顿">
+              <button id="btnDiscover" class="ghost">搜索</button>
+            </div>
+            <div class="row row-plat">
+              <select id="kwPlatform" aria-label="选择平台">
+                <option value="bilibili">B站（匿名可用）</option>
+                <option value="weibo">微博（需登录）</option>
+                <option value="tieba">百度贴吧（需登录）</option>
+                <option value="nga">NGA 论坛（可匿名）</option>
+                <option value="taptap">TapTap（浏览器助手）</option>
+                <option value="douyin">抖音（浏览器助手）</option>
+                <option value="xiaohongshu">小红书（浏览器助手）</option>
+                <option value="reddit">Reddit（海外）</option>
+                <option value="steam">Steam（搜索常不可达）</option>
+              </select>
+              <select id="kwSort" class="auto" aria-label="排序方式">
+                <option value="hot">按热度</option>
+                <option value="new">按最新</option>
+              </select>
+              <select id="kwLimit" class="auto" aria-label="结果条数">
+                <option value="10">10 条</option>
+                <option value="20" selected>20 条</option>
+                <option value="30">30 条</option>
+              </select>
+            </div>
+            <div class="row">
+              <div class="narrow">
+                <label for="kwTopN">热度前 N 个来源</label>
+                <select id="kwTopN">
+                  <option value="3">前 3 个</option>
+                  <option value="5" selected>前 5 个</option>
+                  <option value="10">前 10 个</option>
+                  <option value="20">前 20 个</option>
+                </select>
+              </div>
+              <div class="narrow">
+                <label for="kwComments">每个来源评论数</label>
+                <input type="number" id="kwComments" value="300" min="10" max="20000">
+              </div>
+            </div>
+            <div class="row">
+              <button id="btnKeywordCollect" class="primary">搜索并采集（热度前 N）</button>
+              <button id="btnDiscoverOnly" class="ghost">仅搜索（手动勾选）</button>
+            </div>
+            <div id="discoverBox" class="mut">输入关键词后点「搜索并采集」可一键抓取热度前 N 个来源的评论；或点「仅搜索」手动勾选。抖音/小红书走浏览器助手，会在已登录浏览器里搜索并逐条抓评论。</div>
+          </section>
+
+          <section class="panel">
+            <h2>手动导入 <span class="tip">抖音 / 小红书 等走这里</span></h2>
+            <label for="impText">粘贴评论（一行一条）或 CSV / JSON 内容</label>
+            <textarea id="impText" placeholder="玩家A：这版本优化太差了&#10;玩家B：抽卡爆率一如既往的感人"></textarea>
+            <div class="row">
+              <select id="impFmt" aria-label="导入格式">
+                <option value="auto">自动识别</option>
+                <option value="text">纯文本（一行一条）</option>
+                <option value="csv">CSV</option>
+                <option value="json">JSON</option>
+              </select>
+              <button id="btnImport">导入</button>
+            </div>
+            <div class="row">
+              <button id="btnCopyScript" class="ghost">复制浏览器采集脚本（抖音 / 小红书）</button>
+            </div>
+            <div id="scriptTip" class="mut steps">
+              抖音 / 小红书 有签名风控，服务端抓不到。用这个脚本在你的浏览器里跑：<br>
+              打开视频/笔记页 → 按 F12 → 切到 Console → 粘贴脚本回车 → 自动滚动抓完并下载 JSON → 拖到上面的文本框导入。
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>平台支持情况 <span class="tip">悬停查看说明</span></h2>
+            <div class="plat-list" id="platList"><span class="mut">加载中…</span></div>
+            <div class="mut legend">
+              <span class="chip stable">稳定接口</span>
+              <span class="chip best-effort">网页解析</span>
+              <span class="chip restricted">风控受限</span>
+              <span class="chip manual">需手动导入</span>
+            </div>
+            <div class="mut">平台随时可能改版，解析类采集器失效是正常现象；「手动导入」永远可用，是这些平台的兜底。</div>
+          </section>
         </div>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button id="btnCompare" class="primary">对比</button>
-      </div>
-      <div id="compareResult"></div>
-    </div>
+      </section>
+
+      <!-- ---------- 任务与对比 ---------- -->
+      <section class="view" data-view="tasks" aria-label="任务与对比">
+        <div class="vgrid wide-first">
+          <section class="panel">
+            <h2>任务列表 <span class="tip">点卡片选中，之后的分析就用这个任务</span></h2>
+            <div class="task-list tall" id="taskList"><span class="mut">暂无任务</span></div>
+            <div class="mut">「重采」按同样来源再抓一次，只把新增评论入库（按评论 ID 去重），适合长期跟踪。</div>
+          </section>
+
+          <section class="panel">
+            <h2>版本对比 <span class="tip">两个任务并排看口碑变化</span></h2>
+            <div class="row">
+              <div>
+                <label for="cmpA">任务 A（基线）</label>
+                <select id="cmpA"><option value="">选择任务…</option></select>
+              </div>
+              <div>
+                <label for="cmpB">任务 B（对比）</label>
+                <select id="cmpB"><option value="">选择任务…</option></select>
+              </div>
+            </div>
+            <div class="row">
+              <button id="btnCompare" class="primary">对比</button>
+            </div>
+            <div id="compareResult"></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ---------- 监测与预警 ---------- -->
+      <section class="view" data-view="watch" aria-label="监测与预警">
+        <div class="vgrid">
+          <section class="panel">
+            <h2>监测清单 <span class="tip">定时重采同一链接，盯口碑走势</span></h2>
+            <label for="watchName">监测名称</label>
+            <input type="text" id="watchName" placeholder="如：2.3版本 官方公告帖">
+            <label for="watchUrl">社区链接（帖子 / 视频页，需服务端可直连的平台）</label>
+            <input type="text" id="watchUrl" placeholder="https://www.bilibili.com/video/BV...">
+            <div class="row">
+              <div class="narrow">
+                <label for="watchInterval">重采间隔（小时）</label>
+                <input type="number" id="watchInterval" value="24" min="1" max="720">
+              </div>
+              <button id="btnAddWatch" class="primary">添加并监测</button>
+            </div>
+            <div class="mut">服务启动后每 60s 检查一次到点的监测项，自动增量重采并分析，记录声量与正负向占比走势。抖音 / 小红书等浏览器助手类平台暂不支持自动重采。</div>
+            <div id="watchList" class="watch-list"><span class="mut">暂无监测项</span></div>
+          </section>
+
+          <section class="panel">
+            <h2>预警中心 <span class="tip">跨任务汇总，不重跑分析也能看到当前在报什么</span></h2>
+            <div class="row">
+              <button id="btnAlertUnread" class="ghost sm">只看未读</button>
+              <button id="btnAlertReadAll" class="ghost sm">全部标已读</button>
+              <span id="alertCount" class="mut"></span>
+            </div>
+            <div id="alertList" class="alert-list"><span class="mut">暂无预警</span></div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ---------- 分析结果 ---------- -->
+      <section class="view" data-view="analyze" aria-label="分析结果">
+        <section class="panel toolbar">
+          <h2>分析设置</h2>
+          <div class="opt-grid">
+            <div>
+              <label for="threshold">相似句判定阈值（越低越宽松）</label>
+              <input type="number" id="threshold" value="0.45" step="0.05" min="0.3" max="0.8">
+            </div>
+            <div>
+              <label for="topN">词条数量 Top N</label>
+              <input type="number" id="topN" value="60" min="10" max="200">
+            </div>
+            <div>
+              <label for="stopwords">额外停用词（空格分隔）</label>
+              <input type="text" id="stopwords" placeholder="如：本帖 楼主">
+            </div>
+            <div>
+              <label for="topLiked">仅分析热度前 N 条（0 = 全部）</label>
+              <input type="number" id="topLiked" value="0" min="0" max="20000">
+            </div>
+            <div>
+              <label for="analyzeMax">分析量级上限（0 = 不限制，超过则抽样）</label>
+              <input type="number" id="analyzeMax" value="8000" min="0" max="200000" step="1000">
+            </div>
+            <div>
+              <label for="negRate">负面预警线（%，分析后超线报警）</label>
+              <input type="number" id="negRate" value="25" step="1" min="5" max="90">
+            </div>
+            <div class="opt-check">
+              <label class="check">
+                <input type="checkbox" id="useLlm"> 启用 LLM 情感复核
+              </label>
+            </div>
+          </div>
+          <div class="row row-acts">
+            <button id="btnAnalyze" class="primary">分析选中任务</button>
+            <button id="btnXlsx">导出 Excel</button>
+            <button id="btnCsv">导出 CSV</button>
+            <button id="btnHtml">导出 HTML 报告</button>
+            <span class="spacer"></span>
+            <span class="mut" id="curTask" aria-live="polite">未选中任务</span>
+          </div>
+        </section>
+
+        <div id="result">
+          <div class="empty">先采集或导入评论，然后点「分析选中任务」</div>
+        </div>
+      </section>
+
+      <!-- ---------- 平台与设置 ---------- -->
+      <section class="view" data-view="settings" aria-label="平台与设置">
+        <div class="vgrid">
+          <section class="panel">
+            <h2>平台接入 <span class="tip">点登录 → 一键获取，就能抓完整评论区</span></h2>
+            <div id="credList" class="cred-list"><span class="mut">加载中…</span></div>
+            <div class="row">
+              <div>
+                <label for="setSteamLang">Steam 语言</label>
+                <select id="setSteamLang">
+                  <option value="all">全部语言</option>
+                  <option value="schinese">简体中文</option>
+                  <option value="english">英文</option>
+                </select>
+              </div>
+              <div>
+                <label for="setSteamDays">Steam 时间范围(天)</label>
+                <input type="number" id="setSteamDays" value="365" min="1" max="3650">
+              </div>
+            </div>
+            <div class="row row-3btn">
+              <button id="btnSaveSet" class="primary">保存其他设置</button>
+              <button id="btnReloadSet" class="ghost">刷新状态</button>
+              <button id="btnCloseBrowser" class="ghost">关闭登录浏览器</button>
+            </div>
+            <div class="mut">
+              凭据只保存在本机 <code>data\settings.json</code>，不会上传到任何地方。<br>
+              「一键获取」需要本机装有 Chrome / Edge：会开一个带调试端口的浏览器窗口，你登录后它把 Cookie 读回来，
+              不会保存你的密码。
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>大模型情感增强 <span class="tip">可选 · 提升反讽/阴阳怪气识别</span></h2>
+            <label for="llmEndpoint">OpenAI 兼容接口地址</label>
+            <input type="text" id="llmEndpoint" placeholder="https://api.openai.com/v1">
+            <label for="llmKey">API Key</label>
+            <input type="password" id="llmKey" placeholder="sk-...">
+            <div class="row">
+              <div class="narrow">
+                <label for="llmModel">模型名</label>
+                <input type="text" id="llmModel" placeholder="gpt-4o-mini">
+              </div>
+              <div class="narrow">
+                <label for="llmCap">抽检上限（条）</label>
+                <input type="number" id="llmCap" value="200" min="10" max="2000" step="10">
+              </div>
+            </div>
+            <div class="mut">填好后在「分析结果」屏勾选「启用 LLM 情感复核」即可。规则打底、LLM 复核高赞与易误判评论，接口不通时自动降级为规则结果。</div>
+          </section>
+        </div>
+      </section>
+
+    </main>
   </div>
-
-  <!-- 右栏 -->
-  <div aria-label="分析结果">
-    <div class="panel">
-      <h2>分析设置</h2>
-      <div class="opt-grid">
-        <div>
-          <label for="threshold">相似句判定阈值（越低越宽松）</label>
-          <input type="number" id="threshold" value="0.45" step="0.05" min="0.3" max="0.8">
-        </div>
-        <div>
-          <label for="topN">词条数量 Top N</label>
-          <input type="number" id="topN" value="60" min="10" max="200">
-        </div>
-        <div>
-          <label for="stopwords">额外停用词（空格分隔）</label>
-          <input type="text" id="stopwords" placeholder="如：本帖 楼主">
-        </div>
-        <div>
-          <label for="topLiked">仅分析热度前 N 条（0 = 全部）</label>
-          <input type="number" id="topLiked" value="0" min="0" max="20000">
-        </div>
-        <div>
-          <label for="analyzeMax">分析量级上限（0 = 不限制，超过则抽样）</label>
-          <input type="number" id="analyzeMax" value="8000" min="0" max="200000" step="1000">
-        </div>
-        <div>
-          <label for="negRate">负面预警线（%，分析后超线报警）</label>
-          <input type="number" id="negRate" value="25" step="1" min="5" max="90">
-        </div>
-        <div class="opt-check">
-          <label class="check">
-            <input type="checkbox" id="useLlm"> 启用 LLM 情感复核
-          </label>
-        </div>
-      </div>
-      <div class="row row-acts" style="margin-top:12px; align-items:center">
-        <button id="btnAnalyze" class="primary">分析选中任务</button>
-        <button id="btnXlsx">导出 Excel</button>
-        <button id="btnCsv">导出 CSV</button>
-        <button id="btnHtml">导出 HTML 报告</button>
-        <span class="spacer" style="flex:1"></span>
-        <span class="mut" id="curTask" aria-live="polite">未选中任务</span>
-      </div>
-    </div>
-
-    <div id="result">
-      <div class="empty">先在左侧采集或导入评论，然后点「分析选中任务」</div>
-    </div>
-  </div>
-</main>
+</div>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script src="/vendor/echarts.min.js"></script>
-  <script src="/app.js"></script>
-  <script>
-  /* 左栏页签分组：只切换面板显隐，不碰任何 id 与事件绑定。
-     元素始终在 DOM 里，app.js 的初始化与渲染照常工作。 */
-  (function () {
-    var tabs = document.querySelectorAll('.side-tabs [data-tab]');
-    var panels = document.querySelectorAll('.layout .panel[data-group]');
-    function show(g) {
-      panels.forEach(function (p) { p.hidden = (p.dataset.group !== g); });
-      tabs.forEach(function (t) { t.classList.toggle('active', t.dataset.tab === g); });
-    }
-    tabs.forEach(function (t) {
-      t.addEventListener('click', function () { show(t.dataset.tab); });
-    });
-    show('collect');
-  })();
-  </script>
+<script src="/app.js"></script>
 </body>
 </html>

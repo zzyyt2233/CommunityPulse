@@ -40,6 +40,10 @@ SUITES: list[tuple[str, bool]] = [
     ("test_browser_capture", False),
     ("test_autocapture", True),      # 真起线程跑自动捕获
     ("test_collect_gate", True),     # 真起线程验并发闸门排队
+    # 预警中心：面板是死的、接口是活的，两边字段都要验。起真服务走 HTTP。
+    ("test_alert_center", True),
+    # 监测清单：db 的 CRUD + 增量采集 + 分析 + 预警这条接线，最后一层起真服务。
+    ("test_watchlist", True),
     # 全链路冒烟：分析 + 导入解析 + 导出三格式，最后一步真连 Steam 抓一次
     # （失败只打印不判败），所以整体按离线套件对待。以前一直没被收进来，
     # 只在本地手动跑 —— 是个漏网的孤儿。

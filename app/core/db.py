@@ -95,6 +95,28 @@ CREATE TABLE IF NOT EXISTS watchlist (
     enabled INTEGER DEFAULT 1,
     last_run REAL
 );
+CREATE TABLE IF NOT EXISTS watch_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watch_id INTEGER,
+    task_id INTEGER,
+    level TEXT DEFAULT 'warn',
+    title TEXT NOT NULL,
+    detail TEXT DEFAULT '',
+    created_at REAL,
+    is_read INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_watch_alerts_time ON watch_alerts(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_watch_alerts_watch ON watch_alerts(watch_id);
+CREATE TABLE IF NOT EXISTS watch_snapshots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    watch_id INTEGER NOT NULL,
+    task_id INTEGER,
+    negative_rate REAL DEFAULT 0,
+    positive_rate REAL DEFAULT 0,
+    comment_count INTEGER DEFAULT 0,
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_watch_snaps ON watch_snapshots(watch_id, created_at);
 """
 
 
@@ -412,3 +434,97 @@ def add_watch(name: str, url: str, platform: str = "", interval_hours: int = 24)
 def remove_watch(wid: int) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM watchlist WHERE id=?", (wid,))
+
+
+def update_watch_run(wid: int) -> None:
+    """记下这次跑完的时间，调度器靠它判断下一次什么时候到期。"""
+    with connect() as conn:
+        conn.execute("UPDATE watchlist SET last_run=? WHERE id=?", (time.time(), wid))
+
+
+def set_watch_enabled(wid: int, enabled: bool) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE watchlist SET enabled=? WHERE id=?",
+                     (1 if enabled else 0, wid))
+
+
+def update_watch_interval(wid: int, hours: int) -> None:
+    with connect() as conn:
+        conn.execute("UPDATE watchlist SET interval_hours=? WHERE id=?", (hours, wid))
+
+
+def get_watch(wid: int) -> dict | None:
+    with connect() as conn:
+        r = conn.execute("SELECT * FROM watchlist WHERE id=?", (wid,)).fetchone()
+        return dict(r) if r else None
+
+
+def add_watch_alert(watch_id: int | None, task_id: int | None, level: str,
+                    title: str, detail: str = "") -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO watch_alerts (watch_id, task_id, level, title, detail,"
+            " created_at, is_read) VALUES (?,?,?,?,?,?,0)",
+            (watch_id, task_id, level, title, detail, time.time()))
+        return int(cur.lastrowid)
+
+
+def list_watch_alerts(limit: int = 100, unread_only: bool = False) -> list[dict]:
+    q = "SELECT * FROM watch_alerts"
+    if unread_only:
+        q += " WHERE is_read=0"
+    q += " ORDER BY created_at DESC LIMIT ?"
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(q, (limit,)).fetchall()]
+
+
+def count_unread_alerts() -> int:
+    with connect() as conn:
+        return int(conn.execute(
+            "SELECT COUNT(*) c FROM watch_alerts WHERE is_read=0").fetchone()["c"])
+
+
+def mark_alerts_read(ids: list[int] | None = None) -> int:
+    """传 ids 只标这几条；不传就是「全部已读」。"""
+    with connect() as conn:
+        if not ids:
+            cur = conn.execute("UPDATE watch_alerts SET is_read=1 WHERE is_read=0")
+        else:
+            ph = ",".join("?" * len(ids))
+            cur = conn.execute(f"UPDATE watch_alerts SET is_read=1 WHERE id IN ({ph})",
+                               tuple(ids))
+        return int(cur.rowcount)
+
+
+# ---- 监测快照（每轮跑完存一份，用于趋势迷你图与历史）----
+def add_watch_snapshot(watch_id: int, task_id: int | None, negative_rate: float,
+                       positive_rate: float, comment_count: int) -> int:
+    with connect() as conn:
+        cur = conn.execute(
+            "INSERT INTO watch_snapshots (watch_id, task_id, negative_rate,"
+            " positive_rate, comment_count, created_at) VALUES (?,?,?,?,?,?)",
+            (watch_id, task_id, negative_rate, positive_rate,
+             comment_count, time.time()))
+        return int(cur.lastrowid)
+
+
+def list_watch_snapshots(watch_id: int, limit: int = 50) -> list[dict]:
+    with connect() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM watch_snapshots WHERE watch_id=?"
+            " ORDER BY created_at DESC LIMIT ?", (watch_id, limit)).fetchall()]
+
+
+def latest_watch_snapshot(watch_id: int) -> dict | None:
+    with connect() as conn:
+        r = conn.execute(
+            "SELECT * FROM watch_snapshots WHERE watch_id=?"
+            " ORDER BY created_at DESC LIMIT 1", (watch_id,)).fetchone()
+        return dict(r) if r else None
+
+
+def count_watch_snapshots(watch_id: int) -> int:
+    with connect() as conn:
+        return int(conn.execute(
+            "SELECT COUNT(*) c FROM watch_snapshots WHERE watch_id=?",
+            (watch_id,)).fetchone()["c"])
