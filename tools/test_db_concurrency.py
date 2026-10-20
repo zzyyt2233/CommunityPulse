@@ -62,6 +62,11 @@ def concurrent_create(n):
 
 
 def main():
+    # 建库本来是服务端启动时做的事。这个套件直接调 db 层写库、绕过了 serve()，
+    # 所以先 init_db()（幂等）：干净检出 / 新装机上还没有 data/pulse.db，
+    # 不建表的话 8 个线程全抛 no such table: tasks，测到的就不是并发而是环境。
+    db.init_db()
+
     print("== 库的 journal 模式 ==")
     with db.connect() as conn:
         mode = conn.execute("PRAGMA journal_mode").fetchone()[0]

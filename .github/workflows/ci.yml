@@ -22,6 +22,13 @@ jobs:
   offline-tests:
     name: 离线测试（${{ matrix.os }} / ${{ matrix.deps }}）
     runs-on: ${{ matrix.os }}
+    env:
+      # Windows runner 上 python 的 stdout 走系统 ANSI 代码页，不是 UTF-8。
+      # tools/ 里二十个脚本只有八个自己把 stdout 包成了 UTF-8，剩下十二个直接
+      # 往标准输出打中文和 ✓，编码不对就整片死在 UnicodeEncodeError 上
+      # （本机 GBK 控制台下实测复现过：二十几套同时报同一个编码错）。
+      # 放在 job 级是连 http_probe 那一步一起管住。
+      PYTHONIOENCODING: "utf-8"
     strategy:
       fail-fast: false
       matrix:

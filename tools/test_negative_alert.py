@@ -167,6 +167,10 @@ def main():
     print("== 导出路由 ==")
     # 上面是直接调 exporter，绕过了 HTTP 分发；而路由层恰好出过一次坑：
     # 导出只挂在 do_GET 上，用 POST 打会拿到「未知接口」404。
+    # 建库这一步平时是 serve() 启动时做的，这里直接拿 Handler 起服务，绕过了它，
+    # 所以自己调一次 init_db() —— 否则干净检出 / 新装机上没有 data/pulse.db，
+    # 表不存在，这一层会在 create_task 就抛 no such table: tasks。
+    db.init_db()
     srv = web_server.ThreadingHTTPServer(("127.0.0.1", 0), web_server.Handler)
     port = srv.server_address[1]
     t = threading.Thread(target=srv.serve_forever, daemon=True)
@@ -193,9 +197,15 @@ def main():
         ok("下载到的正是带预警条的报告", 'class="alert high"' in page)
         ok("下载 url 已百分号编码（无裸中文，地址栏直接可用）",
            "%" in url and all(ord(c) < 128 for c in url))
-        # fmt 是 query 参数不是路径段；漏传时应该落到默认的 xlsx，而不是报错
+        # fmt 是 query 参数不是路径段；漏传时应该落到默认的表格导出，而不是报错。
+        # 服务端没装 openpyxl 时 to_excel 自动降级成 CSV（app/export/exporter.py），
+        # 那是一条该被承认的正常路径 —— 所以判据只能是服务端实际吐出的扩展名，
+        # 不能拿跑测试这台机器的环境去要求服务端（CI 的 minimal 档就是另一个环境）。
         j2 = json.loads(urlopen(f"{base}/api/export/{tid}", timeout=10).read())
-        ok("省略 fmt 时默认导出 xlsx", (j2.get("url") or "").endswith(".xlsx"))
+        url2 = j2.get("url") or ""
+        got2 = url2.rsplit(".", 1)[-1].lower() if "." in url2 else ""
+        ok(f"省略 fmt 时也给出电子表格（服务端实际给出 {got2 or '无'}）",
+           got2 in ("xlsx", "csv"))
         j3 = json.loads(urlopen(f"{base}/api/export/{tid}?fmt=csv",
                                 timeout=10).read())
         ok("fmt=csv 走 CSV 分支", (j3.get("url") or "").endswith(".csv"))

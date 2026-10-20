@@ -129,7 +129,7 @@ init_jieba()
 
 
 def _fallback_cut(text: str) -> list[str]:
-    """无 jieba 时的正向最大匹配 + 单字兜底。"""
+    """无 jieba 时的正向最大匹配 + 滑窗二元组兜底。"""
     vocab = _userdict_terms()
     out: list[str] = []
     i, n = 0, len(text)
@@ -155,8 +155,11 @@ def _fallback_cut(text: str) -> list[str]:
             if len(seg) <= 2:
                 out.append(seg)
             else:
-                out.extend([seg[k:k + 2] for k in range(0, len(seg) - 1, 2)]
-                           if len(seg) % 2 == 0 else list(seg))
+                # 步长 1 的滑窗二元组，不是不重叠二元组：不重叠会把跨切分边界的
+                # 搭配（「太肝」「闪退」）切碎，零依赖模式下正面短语就抽不出来；
+                # 而奇数长度原本退化成逐个单字，单字又被 tokenize 当噪声丢掉，
+                # 等于这一整段文本一个词都没贡献出去。
+                out.extend(seg[k:k + 2] for k in range(len(seg) - 1))
             i = j
         else:
             j = i
