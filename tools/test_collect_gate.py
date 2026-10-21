@@ -148,8 +148,18 @@ def main():
             ids = [server.start_collect(f"闸门冒烟{i}", ["https://slow.example/x"],
                                         limit=10) for i in range(n)]
             created.extend(ids)
-            time.sleep(0.5)
+            # 从起线程到把 running 写进库有几十毫秒的抖动，机器忙的时候更容易晚。
+            # 原来固定睡 0.5 秒就读状态，三次里有一次只看到 2 个 running ——
+            # 那是测试在赌调度器，不是闸门少放了槽位。改成最多等 4 秒，
+            # 一到目标状态就走；下一句「排队的随后也跑完」仍然会抓住真的卡死。
+            deadline = time.time() + 4
             st = [db.get_task(i)["status"] for i in ids]
+            while time.time() < deadline:
+                time.sleep(0.05)
+                st = [db.get_task(i)["status"] for i in ids]
+                if (st.count("running") == server._COLLECT_MAX
+                        and st.count("pending") == 1):
+                    break
             ok(f"同时 {server._COLLECT_MAX} 个在跑、第 {n} 个排队",
                st.count("running") == server._COLLECT_MAX and st.count("pending") == 1)
 
