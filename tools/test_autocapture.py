@@ -17,6 +17,7 @@ if str(ROOT) not in sys.path:
 import app.core.browser_cdp as bcd          # noqa: E402
 import app.core.config as cfg               # noqa: E402
 from app.core import credentials            # noqa: E402
+from app.core import secret                 # noqa: E402
 import app.server as srv                    # noqa: E402
 
 TMP = ROOT / "temp" / "autocapture"
@@ -62,17 +63,26 @@ try:
         f"登录后应自动写入 Cookie，实际 {s.get('bilibili_cookie')!r}"
 
     # 真要落在 temp 里，顺便确认没跑到真实 data/ 去。
-    # 盘上是 DPAPI 密文，所以不能直接找 abc123 —— 找得到反而说明加密没生效。
     target = TMP / "settings.json"
     assert target.exists(), "应该写进临时目录的 settings.json"
     on_disk = target.read_text(encoding="utf-8")
-    assert "abc123" not in on_disk, \
-        f"settings.json 里不该有明文 Cookie：{on_disk[:120]}"
-    assert "dpapi:v1:" in on_disk, "凭据应该以密文形式落盘"
+    # 加密只在 Windows 上做（DPAPI 是系统自带的），非 Windows 原样落盘是
+    # app/core/secret.py 文件头写明的既定行为 —— 但「读回来必须完整」这条两边都不打折，
+    # 本套件真正要验的是自动捕获这条链路，不是 DPAPI 本身（那由 test_secret_settings 管）。
+    if secret._IS_WINDOWS:
+        # 盘上是密文，所以不能直接找 abc123 —— 找得到反而说明加密没生效。
+        assert "abc123" not in on_disk, \
+            f"settings.json 里不该有明文 Cookie：{on_disk[:120]}"
+        assert secret.PREFIX in on_disk, "凭据应该以密文形式落盘"
+        how = "盘上为 DPAPI 密文"
+    else:
+        assert "abc123" in on_disk, "非 Windows 平台按既定行为明文落盘"
+        assert secret.PREFIX not in on_disk, "非 Windows 平台不该出现密文前缀"
+        how = "非 Windows 按既定行为明文落盘"
     assert cfg.load_settings().get("bilibili_cookie") == "SESSDATA=abc123; other=1", \
-        "密文要能原样读回来"
+        "落盘的 Cookie 要能原样读回来"
     assert cfg.DATA_DIR == TMP, "DATA_DIR 必须一直指着临时目录"
-    print("PASS: 登录态已自动捕获并持久化到 settings.json（盘上为密文）")
+    print(f"PASS: 登录态已自动捕获并持久化到 settings.json（{how}）")
 finally:
     cfg.DATA_DIR = _orig_dir
     shutil.rmtree(TMP, ignore_errors=True)
